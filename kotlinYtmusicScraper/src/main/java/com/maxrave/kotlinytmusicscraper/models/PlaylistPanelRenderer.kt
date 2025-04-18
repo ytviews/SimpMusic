@@ -9,7 +9,7 @@ data class PlaylistPanelRenderer(
     val shortBylineText: Runs?,
     val contents: List<Content>,
     val currentIndex: Int?,
-    val isInfinite: Boolean,
+    val isInfinite: Boolean? = null,
     val numItemsToShow: Int?,
     val playlistId: String? = null,
     val continuations: List<Continuation>?,
@@ -26,7 +26,7 @@ data class PlaylistPanelRenderer(
         ) {
             @Serializable
             data class PrimaryRenderer(
-                val playlistPanelVideoRenderer: PlaylistPanelVideoRenderer?
+                val playlistPanelVideoRenderer: PlaylistPanelVideoRenderer?,
             )
         }
     }

@@ -10,6 +10,7 @@ import com.maxrave.kotlinytmusicscraper.models.SongItem
 import com.maxrave.simpmusic.R
 import com.maxrave.simpmusic.common.Config.ALBUM_CLICK
 import com.maxrave.simpmusic.common.Config.PLAYLIST_CLICK
+import com.maxrave.simpmusic.common.Config.RADIO_CLICK
 import com.maxrave.simpmusic.common.Config.RECOVER_TRACK_QUEUE
 import com.maxrave.simpmusic.common.Config.SHARE
 import com.maxrave.simpmusic.common.Config.SONG_CLICK
@@ -46,6 +47,7 @@ abstract class BaseViewModel(
     protected val simpleMediaServiceHandler: SimpleMediaServiceHandler by inject()
 
     private val _nowPlayingVideoId: MutableStateFlow<String> = MutableStateFlow("")
+
     /**
      * Get now playing video id
      * If empty, no video is playing
@@ -55,12 +57,15 @@ abstract class BaseViewModel(
     /**
      * Tag for logging
      */
-    abstract val tag: String
+    protected val tag: String = javaClass.simpleName
 
     /**
      * Log with viewModel tag
      */
-    protected fun log(message: String, logType: Int) {
+    protected fun log(
+        message: String,
+        logType: Int = Log.WARN,
+    ) {
         when (logType) {
             Log.ASSERT -> Log.wtf(tag, message)
             Log.VERBOSE -> Log.v(tag, message)
@@ -97,6 +102,7 @@ abstract class BaseViewModel(
     fun showLoadingDialog(message: String? = null) {
         _showLoadingDialog.value = true to (message ?: getString(R.string.loading))
     }
+
     fun hideLoadingDialog() {
         _showLoadingDialog.value = false to getString(R.string.loading)
     }
@@ -112,7 +118,6 @@ abstract class BaseViewModel(
                     _nowPlayingVideoId.value = ""
                 }
             }
-
         }
     }
 
@@ -126,14 +131,15 @@ abstract class BaseViewModel(
     fun <T> loadMediaItem(
         anyTrack: T,
         type: String,
-        index: Int? = null
+        index: Int? = null,
     ) {
-        val track = when (anyTrack) {
-            is Track -> anyTrack
-            is SongItem -> anyTrack.toTrack()
-            is SongEntity -> anyTrack.toTrack()
-            else -> return
-        }
+        val track =
+            when (anyTrack) {
+                is Track -> anyTrack
+                is SongItem -> anyTrack.toTrack()
+                is SongEntity -> anyTrack.toTrack()
+                else -> return
+            }
         viewModelScope.launch {
             mainRepository.insertSong(track.toSongEntity()).singleOrNull()?.let {
                 log("Inserted song: ${track.title}", Log.DEBUG)
@@ -149,7 +155,7 @@ abstract class BaseViewModel(
                 SONG_CLICK, VIDEO_CLICK, SHARE -> {
                     simpleMediaServiceHandler.getRelated(track.videoId)
                 }
-                PLAYLIST_CLICK, ALBUM_CLICK -> {
+                PLAYLIST_CLICK, ALBUM_CLICK, RADIO_CLICK -> {
                     simpleMediaServiceHandler.loadPlaylistOrAlbum(index)
                 }
             }

@@ -4,16 +4,19 @@ import android.util.Log
 import com.maxrave.kotlinytmusicscraper.models.MusicResponsiveListItemRenderer
 import com.maxrave.kotlinytmusicscraper.models.MusicShelfRenderer
 import com.maxrave.kotlinytmusicscraper.models.SongItem
+import com.maxrave.kotlinytmusicscraper.models.WatchEndpoint
 import com.maxrave.kotlinytmusicscraper.models.getContinuation
 import com.maxrave.kotlinytmusicscraper.models.response.BrowseResponse
 import com.maxrave.kotlinytmusicscraper.models.response.LikeStatus
 
 fun BrowseResponse.fromPlaylistToTrack(): List<SongItem> =
     (
-        (this.contents
-            ?.singleColumnBrowseResultsRenderer?.tabs
-            ?: this.contents?.twoColumnBrowseResultsRenderer?.tabs
-            )?.firstOrNull()
+        (
+            this.contents
+                ?.singleColumnBrowseResultsRenderer
+                ?.tabs
+                ?: this.contents?.twoColumnBrowseResultsRenderer?.tabs
+        )?.firstOrNull()
             ?.tabRenderer
             ?.content
             ?.sectionListRenderer
@@ -35,10 +38,12 @@ fun BrowseResponse.fromPlaylistToTrack(): List<SongItem> =
 
 fun BrowseResponse.fromPlaylistToTrackWithSetVideoId(): List<Pair<SongItem, String>> =
     (
-        (this.contents
-            ?.singleColumnBrowseResultsRenderer?.tabs
-            ?: this.contents?.twoColumnBrowseResultsRenderer?.tabs
-            )?.firstOrNull()
+        (
+            this.contents
+                ?.singleColumnBrowseResultsRenderer
+                ?.tabs
+                ?: this.contents?.twoColumnBrowseResultsRenderer?.tabs
+        )?.firstOrNull()
             ?.tabRenderer
             ?.content
             ?.sectionListRenderer
@@ -54,66 +59,209 @@ fun BrowseResponse.fromPlaylistToTrackWithSetVideoId(): List<Pair<SongItem, Stri
                 ?.firstOrNull()
                 ?.musicPlaylistShelfRenderer
                 ?.contents
-        )?.mapNotNull { content ->
-            Pair(
-                content.toSongItem() ?: return@mapNotNull null,
-                content.toPlaylistItemData()?.playlistSetVideoId ?: return@mapNotNull null,
-            )
-        } ?: emptyList()
+    )?.mapNotNull { content ->
+        Pair(
+            content.toSongItem() ?: return@mapNotNull null,
+            content.toPlaylistItemData()?.playlistSetVideoId ?: return@mapNotNull null,
+        )
+    } ?: emptyList()
 
 fun BrowseResponse.fromPlaylistContinuationToTracks(): List<SongItem> =
-    (this.continuationContents
-        ?.musicPlaylistShelfContinuation
-        ?.contents
-        ?: this.continuationContents
-            ?.sectionListContinuation
+    (
+        this.continuationContents
+            ?.musicPlaylistShelfContinuation
             ?.contents
-            ?.firstOrNull()
-            ?.musicShelfRenderer
-            ?.contents)
-        ?.mapNotNull { contents ->
-            contents.toSongItem()
-        } ?: emptyList()
+            ?: this.continuationContents
+                ?.sectionListContinuation
+                ?.contents
+                ?.firstOrNull()
+                ?.musicShelfRenderer
+                ?.contents
+    )?.mapNotNull { contents ->
+        contents.toSongItem()
+    } ?: emptyList()
 
 fun BrowseResponse.fromPlaylistContinuationToTrackWithSetVideoId(): List<Pair<SongItem, String>> =
-    (this.continuationContents
-        ?.musicPlaylistShelfContinuation
-        ?.contents
-    ?: this.continuationContents
-        ?.sectionListContinuation
-        ?.contents
-        ?.firstOrNull()
-        ?.musicShelfRenderer
-        ?.contents)
-        ?.mapNotNull { contents ->
-            Pair(
-                contents.toSongItem() ?: return@mapNotNull null,
-                contents.toPlaylistItemData()?.playlistSetVideoId ?: return@mapNotNull null,
-            )
-        } ?: emptyList()
+    (
+        this.continuationContents
+            ?.musicPlaylistShelfContinuation
+            ?.contents
+            ?: this.continuationContents
+                ?.sectionListContinuation
+                ?.contents
+                ?.firstOrNull()
+                ?.musicShelfRenderer
+                ?.contents
+    )?.mapNotNull { contents ->
+        Pair(
+            contents.toSongItem() ?: return@mapNotNull null,
+            contents.toPlaylistItemData()?.playlistSetVideoId ?: return@mapNotNull null,
+        )
+    } ?: emptyList()
 
 fun BrowseResponse.getPlaylistContinuation(): String? =
-    this.contents
-        ?.singleColumnBrowseResultsRenderer
-        ?.tabs
+    this.onResponseReceivedActions
         ?.firstOrNull()
-        ?.tabRenderer
-        ?.content
-        ?.sectionListRenderer
-        ?.continuations
-        ?.getContinuation()
-    ?: this.contents
-        ?.twoColumnBrowseResultsRenderer
-        ?.secondaryContents
-        ?.sectionListRenderer
-        ?.continuations
-        ?.getContinuation()
+        ?.appendContinuationItemsAction
+        ?.continuationItems
+        ?.lastOrNull()
+        ?.continuationItemRenderer
+        ?.continuationEndpoint
+        ?.continuationCommand
+        ?.token
+        ?: this.contents
+            ?.twoColumnBrowseResultsRenderer
+            ?.secondaryContents
+            ?.sectionListRenderer
+            ?.contents
+            ?.lastOrNull()
+            ?.musicPlaylistShelfRenderer
+            ?.contents
+            ?.lastOrNull()
+            ?.continuationItemRenderer
+            ?.continuationEndpoint
+            ?.continuationCommand
+            ?.token
+        ?: this.contents
+            ?.singleColumnBrowseResultsRenderer
+            ?.tabs
+            ?.firstOrNull()
+            ?.tabRenderer
+            ?.content
+            ?.sectionListRenderer
+            ?.continuations
+            ?.getContinuation()
+        ?: this.contents
+            ?.twoColumnBrowseResultsRenderer
+            ?.secondaryContents
+            ?.sectionListRenderer
+            ?.continuations
+            ?.getContinuation()
+        ?: this.contents
+            ?.singleColumnBrowseResultsRenderer
+            ?.tabs
+            ?.firstOrNull()
+            ?.tabRenderer
+            ?.content
+            ?.sectionListRenderer
+            ?.contents
+            ?.firstOrNull()
+            ?.musicPlaylistShelfRenderer
+            ?.continuations
+            ?.firstOrNull()
+            ?.nextContinuationData
+            ?.continuation
+        ?: this.contents
+            ?.twoColumnBrowseResultsRenderer
+            ?.secondaryContents
+            ?.sectionListRenderer
+            ?.contents
+            ?.firstOrNull()
+            ?.musicPlaylistShelfRenderer
+            ?.continuations
+            ?.firstOrNull()
+            ?.nextContinuationData
+            ?.continuation
+        ?: this.contents
+            ?.twoColumnBrowseResultsRenderer
+            ?.secondaryContents
+            ?.sectionListRenderer
+            ?.contents
+            ?.firstOrNull()
+            ?.musicPlaylistShelfRenderer
+            ?.contents
+            ?.lastOrNull()
+            ?.continuationItemRenderer
+            ?.continuationEndpoint
+            ?.continuationCommand
+            ?.token
+        ?: this.continuationContents
+            ?.musicPlaylistShelfContinuation
+            ?.continuations
+            ?.getContinuation()
 
 fun BrowseResponse.getContinuePlaylistContinuation(): String? =
     this.continuationContents
         ?.musicPlaylistShelfContinuation
         ?.continuations
         ?.getContinuation()
+
+fun BrowseResponse.getPlaylistRadioEndpoint(): WatchEndpoint? {
+    val header =
+        this.header?.musicDetailHeaderRenderer
+            ?: this.header
+                ?.musicEditablePlaylistDetailHeaderRenderer
+                ?.header
+                ?.musicDetailHeaderRenderer
+    if (header != null) {
+        return header.menu.menuRenderer.items
+            .find {
+                it.menuNavigationItemRenderer?.icon?.iconType == "MIX"
+            }?.menuNavigationItemRenderer
+            ?.navigationEndpoint
+            ?.watchPlaylistEndpoint
+    } else {
+        return this.contents
+            ?.twoColumnBrowseResultsRenderer
+            ?.tabs
+            ?.firstOrNull()
+            ?.tabRenderer
+            ?.content
+            ?.sectionListRenderer
+            ?.contents
+            ?.firstOrNull()
+            ?.musicEditablePlaylistDetailHeaderRenderer
+            ?.header
+            ?.musicResponsiveHeaderRenderer
+            ?.buttons
+            ?.lastOrNull()
+            ?.menuRenderer
+            ?.items
+            ?.find {
+                it.menuNavigationItemRenderer?.icon?.iconType == "MIX"
+            }?.menuNavigationItemRenderer
+            ?.navigationEndpoint
+            ?.watchPlaylistEndpoint
+    }
+}
+
+fun BrowseResponse.getPlaylistShuffleEndpoint(): WatchEndpoint? {
+    val header =
+        this.header?.musicDetailHeaderRenderer
+            ?: this.header
+                ?.musicEditablePlaylistDetailHeaderRenderer
+                ?.header
+                ?.musicDetailHeaderRenderer
+    if (header != null) {
+        return header.menu.menuRenderer.topLevelButtons
+            ?.firstOrNull()
+            ?.buttonRenderer
+            ?.navigationEndpoint
+            ?.watchPlaylistEndpoint
+    } else {
+        return return this.contents
+            ?.twoColumnBrowseResultsRenderer
+            ?.tabs
+            ?.firstOrNull()
+            ?.tabRenderer
+            ?.content
+            ?.sectionListRenderer
+            ?.contents
+            ?.firstOrNull()
+            ?.musicEditablePlaylistDetailHeaderRenderer
+            ?.header
+            ?.musicResponsiveHeaderRenderer
+            ?.buttons
+            ?.lastOrNull()
+            ?.menuRenderer
+            ?.items
+            ?.find {
+                it.menuNavigationItemRenderer?.icon?.iconType == "MUSIC_SHUFFLE"
+            }?.menuNavigationItemRenderer
+            ?.navigationEndpoint
+            ?.watchPlaylistEndpoint
+    }
+}
 
 fun MusicShelfRenderer.Content.toPlaylistItemData(): MusicResponsiveListItemRenderer.PlaylistItemData? =
     this.musicResponsiveListItemRenderer?.playlistItemData
@@ -144,22 +292,34 @@ fun MusicShelfRenderer.Content.toSongItem(): SongItem? {
         artists =
             flexColumns
                 .apply {
-                    Log.w("PlaylistParser", "Artists: ${this.map {
-                        it.musicResponsiveListItemFlexColumnRenderer.text?.runs?.firstOrNull()?.text
-                    }}")
-                }
-                .filter {
-                it.musicResponsiveListItemFlexColumnRenderer.isArtist()
-            }.apply {
-                    Log.w("PlaylistParser", "Artists after filter: ${this.map {
-                        it.musicResponsiveListItemFlexColumnRenderer.text?.runs?.firstOrNull()?.text
-                    }}")
-                }
-                .mapNotNull { it.musicResponsiveListItemFlexColumnRenderer.toArtist() },
+                    Log.w(
+                        "PlaylistParser",
+                        "Artists: ${this.map {
+                            it.musicResponsiveListItemFlexColumnRenderer.text
+                                ?.runs
+                                ?.firstOrNull()
+                                ?.text
+                        }}",
+                    )
+                }.filter {
+                    it.musicResponsiveListItemFlexColumnRenderer.isArtist()
+                }.apply {
+                    Log.w(
+                        "PlaylistParser",
+                        "Artists after filter: ${this.map {
+                            it.musicResponsiveListItemFlexColumnRenderer.text
+                                ?.runs
+                                ?.firstOrNull()
+                                ?.text
+                        }}",
+                    )
+                }.mapNotNull { it.musicResponsiveListItemFlexColumnRenderer.toArtist() },
         album =
-            flexColumns.find {
-                it.musicResponsiveListItemFlexColumnRenderer.isAlbum()
-            }?.musicResponsiveListItemFlexColumnRenderer?.toAlbum(),
+            flexColumns
+                .find {
+                    it.musicResponsiveListItemFlexColumnRenderer.isAlbum()
+                }?.musicResponsiveListItemFlexColumnRenderer
+                ?.toAlbum(),
         duration =
             fixedColumns
                 ?.firstOrNull()
@@ -174,14 +334,15 @@ fun MusicShelfRenderer.Content.toSongItem(): SongItem? {
                 ?.thumbnail
                 ?.musicThumbnailRenderer
                 ?.getThumbnailUrl() ?: "",
-        endpoint = flexColumns
-            .first()
-            .musicResponsiveListItemFlexColumnRenderer
-            .text
-            ?.runs
-            ?.firstOrNull()
-            ?.navigationEndpoint
-            ?.watchEndpoint,
+        endpoint =
+            flexColumns
+                .first()
+                .musicResponsiveListItemFlexColumnRenderer
+                .text
+                ?.runs
+                ?.firstOrNull()
+                ?.navigationEndpoint
+                ?.watchEndpoint,
         explicit =
             this.musicResponsiveListItemRenderer?.badges?.toSongBadges()?.contains(
                 SongItem.SongBadges.Explicit,

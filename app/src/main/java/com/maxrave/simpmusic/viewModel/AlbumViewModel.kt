@@ -9,6 +9,7 @@ import com.maxrave.simpmusic.R
 import com.maxrave.simpmusic.common.Config
 import com.maxrave.simpmusic.common.DownloadState
 import com.maxrave.simpmusic.data.model.browse.album.Track
+import com.maxrave.simpmusic.data.model.browse.artist.ResultAlbum
 import com.maxrave.simpmusic.data.model.searchResult.songs.Artist
 import com.maxrave.simpmusic.extension.toAlbumEntity
 import com.maxrave.simpmusic.extension.toArrayListTrack
@@ -16,10 +17,9 @@ import com.maxrave.simpmusic.extension.toSongEntity
 import com.maxrave.simpmusic.service.PlaylistType
 import com.maxrave.simpmusic.service.QueueData
 import com.maxrave.simpmusic.service.test.download.DownloadUtils
+import com.maxrave.simpmusic.ui.theme.md_theme_dark_background
 import com.maxrave.simpmusic.utils.Resource
 import com.maxrave.simpmusic.viewModel.base.BaseViewModel
-import com.maxrave.simpmusic.viewModel.uiState.AlbumUIState
-import com.maxrave.simpmusic.viewModel.uiState.LocalPlaylistState
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,20 +27,14 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.singleOrNull
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import org.koin.android.annotation.KoinViewModel
 import org.koin.core.component.inject
 import java.time.LocalDateTime
 
-@KoinViewModel
 @UnstableApi
 class AlbumViewModel(
-    private val application: Application
-): BaseViewModel(application) {
-
+    private val application: Application,
+) : BaseViewModel(application) {
     private val downloadUtils: DownloadUtils by inject()
-
-    override val tag: String = "AlbumViewModel"
-
     private val _uiState: MutableStateFlow<AlbumUIState> = MutableStateFlow(AlbumUIState.initial())
     val uiState: StateFlow<AlbumUIState> = _uiState
 
@@ -60,16 +54,18 @@ class AlbumViewModel(
                                     browseId = browseId,
                                     title = data.title,
                                     thumbnail = data.thumbnails?.lastOrNull()?.url,
-                                    artist = data.artists.firstOrNull() ?: Artist(
-                                        id = null,
-                                        name = ""
-                                    ),
+                                    artist =
+                                        data.artists.firstOrNull() ?: Artist(
+                                            id = null,
+                                            name = "",
+                                        ),
                                     year = data.year ?: LocalDateTime.now().year.toString(),
                                     trackCount = data.trackCount,
                                     description = data.description,
                                     length = data.duration ?: "",
                                     listTrack = data.tracks,
-                                    loadState = LocalPlaylistState.PlaylistLoadState.Success
+                                    otherVersion = data.otherVersion,
+                                    loadState = LocalPlaylistState.PlaylistLoadState.Success,
                                 )
                             }
                             mainRepository.getAlbum(browseId).singleOrNull().let { album ->
@@ -77,7 +73,7 @@ class AlbumViewModel(
                                     _uiState.update {
                                         it.copy(
                                             downloadState = album.downloadState,
-                                            liked = album.liked
+                                            liked = album.liked,
                                         )
                                     }
                                     mainRepository.updateAlbumInLibrary(LocalDateTime.now(), browseId)
@@ -97,7 +93,7 @@ class AlbumViewModel(
                             makeToast(getString(R.string.error) + ": Null data")
                             _uiState.update {
                                 it.copy(
-                                    loadState = LocalPlaylistState.PlaylistLoadState.Error
+                                    loadState = LocalPlaylistState.PlaylistLoadState.Error,
                                 )
                             }
                         }
@@ -110,17 +106,22 @@ class AlbumViewModel(
                                         browseId = browseId,
                                         title = albumEntity.title,
                                         thumbnail = albumEntity.thumbnails,
-                                        artist = Artist(
-                                            id = albumEntity.artistId?.firstOrNull(),
-                                            name = albumEntity.artistName?.firstOrNull() ?: ""
-                                        ),
+                                        artist =
+                                            Artist(
+                                                id = albumEntity.artistId?.firstOrNull(),
+                                                name = albumEntity.artistName?.firstOrNull() ?: "",
+                                            ),
                                         year = albumEntity.year ?: LocalDateTime.now().year.toString(),
                                         trackCount = albumEntity.trackCount,
                                         description = albumEntity.description,
                                         length = albumEntity.duration ?: "",
-                                        listTrack = (mainRepository.getSongsByListVideoId(albumEntity.tracks ?: emptyList())
-                                            .singleOrNull() ?: emptyList()).toArrayListTrack(),
-                                        loadState = LocalPlaylistState.PlaylistLoadState.Success
+                                        listTrack =
+                                            (
+                                                mainRepository
+                                                    .getSongsByListVideoId(albumEntity.tracks ?: emptyList())
+                                                    .singleOrNull() ?: emptyList()
+                                            ).toArrayListTrack(),
+                                        loadState = LocalPlaylistState.PlaylistLoadState.Success,
                                     )
                                 }
                             } else {
@@ -128,7 +129,7 @@ class AlbumViewModel(
                                 makeToast(getString(R.string.error) + ": ${res.message}")
                                 _uiState.update {
                                     it.copy(
-                                        loadState = LocalPlaylistState.PlaylistLoadState.Error
+                                        loadState = LocalPlaylistState.PlaylistLoadState.Error,
                                     )
                                 }
                             }
@@ -147,39 +148,52 @@ class AlbumViewModel(
         }
     }
 
+    fun setAlbumLike() {
+        viewModelScope.launch {
+            mainRepository.updateAlbumLiked(uiState.value.browseId, if (!uiState.value.liked) 1 else 0)
+            _uiState.update {
+                it.copy(
+                    liked = !it.liked,
+                )
+            }
+        }
+    }
+
     private fun getAlbumFlow(browseId: String) {
         job?.cancel()
         collectDownloadStateJob?.cancel()
-        job = viewModelScope.launch {
-            mainRepository.getAlbumAsFlow(browseId).collectLatest { album ->
-                if (album != null) {
-                    _uiState.update {
-                        it.copy(
-                            downloadState = album.downloadState,
-                            liked = album.liked
-                        )
+        job =
+            viewModelScope.launch {
+                mainRepository.getAlbumAsFlow(browseId).collectLatest { album ->
+                    if (album != null) {
+                        _uiState.update {
+                            it.copy(
+                                downloadState = album.downloadState,
+                                liked = album.liked,
+                            )
+                        }
                     }
                 }
             }
-        }
-        collectDownloadStateJob = viewModelScope.launch {
-            downloadUtils.downloadTask.collectLatest { downloadTask ->
-                var count = 0
-                uiState.value.listTrack.forEach { track ->
-                    if (downloadTask.get(track.videoId) == DownloadState.STATE_DOWNLOADED) {
-                        count++
+        collectDownloadStateJob =
+            viewModelScope.launch {
+                downloadUtils.downloadTask.collectLatest { downloadTask ->
+                    var count = 0
+                    uiState.value.listTrack.forEach { track ->
+                        if (downloadTask.get(track.videoId) == DownloadState.STATE_DOWNLOADED) {
+                            count++
+                        }
                     }
-                }
-                if (count == uiState.value.listTrack.size) {
-                    mainRepository.updateAlbumDownloadState(uiState.value.browseId, DownloadState.STATE_DOWNLOADED)
-                    _uiState.update {
-                        it.copy(
-                            downloadState = DownloadState.STATE_DOWNLOADED
-                        )
+                    if (count == uiState.value.listTrack.size) {
+                        mainRepository.updateAlbumDownloadState(uiState.value.browseId, DownloadState.STATE_DOWNLOADED)
+                        _uiState.update {
+                            it.copy(
+                                downloadState = DownloadState.STATE_DOWNLOADED,
+                            )
+                        }
                     }
                 }
             }
-        }
     }
 
     fun playTrack(track: Track) {
@@ -191,7 +205,7 @@ class AlbumViewModel(
                 playlistName = "${getString(R.string.album)} \"${uiState.value.title}\"",
                 playlistType = PlaylistType.PLAYLIST,
                 continuation = null,
-            )
+            ),
         )
         val index = uiState.value.listTrack.indexOf(track)
         loadMediaItem(track, Config.ALBUM_CLICK, if (index == -1) 0 else index)
@@ -212,7 +226,7 @@ class AlbumViewModel(
                 playlistName = "${getString(R.string.album)} \"${uiState.value.title}\"",
                 playlistType = PlaylistType.PLAYLIST,
                 continuation = null,
-            )
+            ),
         )
         loadMediaItem(shuffleList[randomIndex], Config.ALBUM_CLICK, randomIndex)
     }
@@ -225,8 +239,10 @@ class AlbumViewModel(
                     log("Insert Song $it", Log.DEBUG)
                 }
             }
-            val fullListSong = mainRepository.getSongsByListVideoId(uiState.value.listTrack.map { it.videoId })
-                .singleOrNull() ?: emptyList()
+            val fullListSong =
+                mainRepository
+                    .getSongsByListVideoId(uiState.value.listTrack.map { it.videoId })
+                    .singleOrNull() ?: emptyList()
             log("Full list song: $fullListSong", Log.DEBUG)
             if (fullListSong.isEmpty()) {
                 makeToast(getString(R.string.playlist_is_empty))
@@ -242,9 +258,36 @@ class AlbumViewModel(
             listJob.forEach {
                 log("Download: ${it.videoId} ${it.thumbnails}", Log.DEBUG)
                 downloadUtils.downloadTrack(
-                    it.videoId, it.title, it.thumbnails ?: ""
+                    it.videoId,
+                    it.title,
+                    it.thumbnails ?: "",
                 )
             }
         }
+    }
+}
+
+data class AlbumUIState(
+    val browseId: String = "",
+    val title: String = "",
+    val thumbnail: String? = null,
+    val colors: List<Color> = listOf(Color.Black, md_theme_dark_background),
+    val artist: Artist =
+        Artist(
+            id = null,
+            name = "",
+        ),
+    val year: String = LocalDateTime.now().year.toString(),
+    val downloadState: Int = DownloadState.STATE_NOT_DOWNLOADED,
+    val liked: Boolean = false,
+    val trackCount: Int = 0,
+    val description: String? = null,
+    val length: String = "",
+    val listTrack: List<Track> = emptyList(),
+    val otherVersion: List<ResultAlbum> = emptyList(),
+    val loadState: LocalPlaylistState.PlaylistLoadState = LocalPlaylistState.PlaylistLoadState.Loading,
+) {
+    companion object {
+        fun initial(): AlbumUIState = AlbumUIState()
     }
 }

@@ -9,6 +9,13 @@ plugins {
     alias(libs.plugins.aboutlibraries)
 }
 
+kotlin {
+    jvmToolchain(17) // or appropriate version
+    compilerOptions {
+        freeCompilerArgs.add("-Xwhen-guards")
+    }
+}
+
 android {
     namespace = "com.maxrave.simpmusic"
     compileSdk = 35
@@ -17,40 +24,52 @@ android {
         applicationId = "com.maxrave.simpmusic"
         minSdk = 26
         targetSdk = 35
-        versionCode = 21
-        versionName = "0.2.4"
+        versionCode =
+            libs.versions.version.code
+                .get()
+                .toInt()
+        versionName =
+            libs.versions.version.name
+                .get()
         vectorDrawables.useSupportLibrary = true
 
         ksp {
             arg("room.schemaLocation", "$projectDir/schemas")
             arg("KOIN_CONFIG_CHECK", "true")
-            arg("KOIN_USE_COMPOSE_VIEWMODEL","true")
+            arg("KOIN_USE_COMPOSE_VIEWMODEL", "true")
         }
 
-        resourceConfigurations +=
-            listOf(
-                "en",
-                "vi",
-                "it",
-                "de",
-                "ru",
-                "tr",
-                "fi",
-                "pl",
-                "pt",
-                "fr",
-                "es",
-                "zh",
-                "in",
-                "ar",
-                "ja",
-                "b+zh+Hant+TW",
-                "uk",
-                "iw",
-                "az",
-                "hi",
-                "th"
-            )
+        @Suppress("UnstableApiUsage")
+        androidResources {
+            localeFilters +=
+                listOf(
+                    "en",
+                    "vi",
+                    "it",
+                    "de",
+                    "ru",
+                    "tr",
+                    "fi",
+                    "pl",
+                    "pt",
+                    "fr",
+                    "es",
+                    "zh",
+                    "in",
+                    "ar",
+                    "ja",
+                    "b+zh+Hant+TW",
+                    "uk",
+                    "iw",
+                    "az",
+                    "hi",
+                    "th",
+                    "nl",
+                    "ko",
+                    "ca",
+                    "fa",
+                )
+        }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -62,6 +81,14 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            splits {
+                abi {
+                    isEnable = true
+                    reset()
+                    isUniversalApk = true
+                    include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+                }
+            }
         }
         debug {
             isMinifyEnabled = false
@@ -85,9 +112,6 @@ android {
     buildFeatures {
         viewBinding = true
         compose = true
-    }
-    composeCompiler {
-        enableStrongSkippingMode = true
     }
     packaging {
         jniLibs.useLegacyPackaging = true
@@ -179,6 +203,7 @@ android {
 
 dependencies {
 
+    implementation(project(":lyricsProviders"))
     // Compose
     val composeBom = platform(libs.compose.bom)
     implementation(composeBom)
@@ -189,6 +214,7 @@ dependencies {
     implementation(libs.compose.material.ripple)
     implementation(libs.compose.material.icons.core)
     implementation(libs.compose.material.icons.extended)
+    implementation(libs.compose.ui.viewbinding)
     implementation(libs.constraintlayout.compose)
 
     // Android Studio Preview support
@@ -208,7 +234,10 @@ dependencies {
     implementation(libs.material)
     // Runtime
     implementation(libs.startup.runtime)
+    // Other module
     implementation(project(mapOf("path" to ":kotlinYtmusicScraper")))
+    implementation(project(mapOf("path" to ":spotify")))
+
     implementation(libs.lifecycle.livedata.ktx)
     implementation(libs.lifecycle.viewmodel.ktx)
     debugImplementation(libs.ui.tooling)
@@ -223,6 +252,7 @@ dependencies {
     implementation(libs.media3.exoplayer.smoothstreaming)
     implementation(libs.media3.exoplayer.workmanager)
     implementation(libs.media3.datasource.okhttp)
+    implementation(libs.okhttp3.logging.interceptor)
 
     // Palette Color
     implementation(libs.palette.ktx)
@@ -289,6 +319,7 @@ dependencies {
     implementation(libs.ssp.android)
 
     implementation(libs.aboutlibraries)
+    implementation(libs.aboutlibraries.compose.m3)
 
     implementation(libs.flexbox)
     implementation(libs.balloon)
@@ -304,11 +335,16 @@ dependencies {
     implementation(libs.koin.android)
     implementation(libs.koin.workmanager)
     implementation(libs.koin.androidx.compose)
-    implementation(libs.koin.annotations)
-    ksp(libs.koin.ksp)
 
     // Store5
     implementation(libs.store)
+
+    // Jetbrains Markdown
+    api(libs.markdown)
+
+    // Blur Haze
+    implementation(libs.haze)
+    implementation(libs.haze.material)
 }
 aboutLibraries {
     prettyPrint = true

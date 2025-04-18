@@ -18,17 +18,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import org.koin.android.annotation.KoinViewModel
 import org.koin.core.component.inject
 import java.time.LocalDateTime
 
-@KoinViewModel
 @UnstableApi
-class MostPlayedViewModel(private val application: Application): BaseViewModel(application) {
-
-    override val tag: String
-        get() = "MostPlayedViewModel"
-
+class MostPlayedViewModel(
+    private val application: Application,
+) : BaseViewModel(application) {
     private val downloadUtils: DownloadUtils by inject()
 
     private var _listMostPlayedSong: MutableLiveData<ArrayList<SongEntity>> = MutableLiveData()
@@ -56,13 +52,15 @@ class MostPlayedViewModel(private val application: Application): BaseViewModel(a
         }
     }
 
-    fun updateLikeStatus(videoId: String, likeStatus: Int) {
+    fun updateLikeStatus(
+        videoId: String,
+        likeStatus: Int,
+    ) {
         viewModelScope.launch {
             mainRepository.updateLikeStatus(likeStatus = likeStatus, videoId = videoId)
             getSongEntity(videoId)
         }
     }
-
 
     fun getAllLocalPlaylist() {
         viewModelScope.launch {
@@ -72,12 +70,15 @@ class MostPlayedViewModel(private val application: Application): BaseViewModel(a
         }
     }
 
-    fun updateLocalPlaylistTracks(list: List<String>, id: Long) {
+    fun updateLocalPlaylistTracks(
+        list: List<String>,
+        id: Long,
+    ) {
         viewModelScope.launch {
             mainRepository.getSongsByListVideoId(list).collect { values ->
                 var count = 0
                 values.forEach { song ->
-                    if (song.downloadState == DownloadState.STATE_DOWNLOADED){
+                    if (song.downloadState == DownloadState.STATE_DOWNLOADED) {
                         count++
                     }
                 }
@@ -85,14 +86,17 @@ class MostPlayedViewModel(private val application: Application): BaseViewModel(a
                 Toast.makeText(application, application.getString(R.string.added_to_playlist), Toast.LENGTH_SHORT).show()
                 if (count == values.size) {
                     mainRepository.updateLocalPlaylistDownloadState(DownloadState.STATE_DOWNLOADED, id)
-                }
-                else {
+                } else {
                     mainRepository.updateLocalPlaylistDownloadState(DownloadState.STATE_NOT_DOWNLOADED, id)
                 }
             }
         }
     }
-    fun updateDownloadState(videoId: String, state: Int) {
+
+    fun updateDownloadState(
+        videoId: String,
+        state: Int,
+    ) {
         viewModelScope.launch {
             mainRepository.getSongById(videoId).collect { songEntity ->
                 _songEntity.value = songEntity
@@ -107,15 +111,19 @@ class MostPlayedViewModel(private val application: Application): BaseViewModel(a
     @UnstableApi
     fun getDownloadStateFromService(videoId: String) {
     }
-    fun addToYouTubePlaylist(localPlaylistId: Long, youtubePlaylistId: String, videoId: String) {
+
+    fun addToYouTubePlaylist(
+        localPlaylistId: Long,
+        youtubePlaylistId: String,
+        videoId: String,
+    ) {
         viewModelScope.launch {
             mainRepository.updateLocalPlaylistYouTubePlaylistSyncState(localPlaylistId, LocalPlaylistEntity.YouTubeSyncState.Syncing)
             mainRepository.addYouTubePlaylistItem(youtubePlaylistId, videoId).collect { response ->
                 if (response == "STATUS_SUCCEEDED") {
                     mainRepository.updateLocalPlaylistYouTubePlaylistSyncState(localPlaylistId, LocalPlaylistEntity.YouTubeSyncState.Synced)
                     Toast.makeText(application, application.getString(R.string.added_to_youtube_playlist), Toast.LENGTH_SHORT).show()
-                }
-                else {
+                } else {
                     mainRepository.updateLocalPlaylistYouTubePlaylistSyncState(localPlaylistId, LocalPlaylistEntity.YouTubeSyncState.NotSynced)
                     Toast.makeText(application, application.getString(R.string.error), Toast.LENGTH_SHORT).show()
                 }
@@ -128,6 +136,7 @@ class MostPlayedViewModel(private val application: Application): BaseViewModel(a
             mainRepository.updateSongInLibrary(LocalDateTime.now(), videoId)
         }
     }
+
     fun insertPairSongLocalPlaylist(pairSongLocalPlaylist: PairSongLocalPlaylist) {
         viewModelScope.launch {
             mainRepository.insertPairSongLocalPlaylist(pairSongLocalPlaylist)

@@ -158,6 +158,12 @@ interface DatabaseDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertSong(song: SongEntity): Long
 
+    @Query("UPDATE song SET canvasUrl = :canvasUrl WHERE videoId = :videoId")
+    suspend fun updateCanvasUrl(
+        videoId: String,
+        canvasUrl: String,
+    )
+
     @Query("UPDATE song SET thumbnails = :thumbnails WHERE videoId = :videoId")
     suspend fun updateThumbnailsSongEntity(
         thumbnails: String,
@@ -197,6 +203,9 @@ interface DatabaseDao {
         offset: Int,
     ): List<SongEntity>
 
+    @Query("SELECT * FROM song WHERE canvasUrl IS NOT NULL ORDER BY totalPlayTime DESC LIMIT :max")
+    suspend fun getCanvasSong(max: Int): List<SongEntity>
+
     @Query("SELECT videoId FROM song WHERE videoId IN (:primaryKeyList) AND downloadState = 3")
     fun getDownloadedVideoIdByListVideoId(primaryKeyList: List<String>): Flow<List<String>>
 
@@ -212,6 +221,12 @@ interface DatabaseDao {
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertArtist(artist: ArtistEntity)
+
+    @Query("UPDATE artist SET thumbnails = :thumbnails WHERE channelId = :channelId")
+    suspend fun updateArtistImage(
+        channelId: String,
+        thumbnails: String,
+    )
 
     @Query("UPDATE artist SET followed = :followed WHERE channelId = :channelId")
     suspend fun updateFollowed(
@@ -276,6 +291,9 @@ interface DatabaseDao {
     suspend fun insertPlaylist(playlist: PlaylistEntity)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAndReplacePlaylist(playlist: PlaylistEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertRadioPlaylist(playlist: PlaylistEntity)
 
     @Query("UPDATE playlist SET liked = :liked WHERE id = :playlistId")
@@ -304,7 +322,7 @@ interface DatabaseDao {
     suspend fun getAllLocalPlaylists(): List<LocalPlaylistEntity>
 
     @Query("SELECT * FROM local_playlist WHERE id = :id")
-    suspend fun getLocalPlaylist(id: Long): LocalPlaylistEntity
+    suspend fun getLocalPlaylist(id: Long): LocalPlaylistEntity?
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertLocalPlaylist(localPlaylist: LocalPlaylistEntity)
@@ -426,7 +444,10 @@ interface DatabaseDao {
     suspend fun getPlaylistPairSong(playlistId: Long): List<PairSongLocalPlaylist>?
 
     @Query("SELECT * FROM pair_song_local_playlist WHERE playlistId = :playlistId AND position in (:positionList)")
-    suspend fun getPlaylistPairSongByListPosition(playlistId: Long, positionList: List<Int>): List<PairSongLocalPlaylist>?
+    suspend fun getPlaylistPairSongByListPosition(
+        playlistId: Long,
+        positionList: List<Int>,
+    ): List<PairSongLocalPlaylist>?
 
     @Query(
         "SELECT * FROM pair_song_local_playlist WHERE playlistId = :playlistId ORDER BY position " +
@@ -478,7 +499,7 @@ interface DatabaseDao {
     suspend fun updateGoogleAccountUsed(
         isUsed: Boolean,
         email: String,
-    )
+    ): Int
 
     @Query("DELETE FROM googleaccountentity WHERE email = :email")
     suspend fun deleteGoogleAccount(email: String)

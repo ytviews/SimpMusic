@@ -5,12 +5,17 @@ import android.app.Service
 import android.content.Context
 import android.graphics.Color
 import android.graphics.Point
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Bundle
 import android.text.Html
+import android.text.Spanned
+import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageButton
 import android.widget.TextView
+import androidx.compose.ui.text.fromHtml
 import androidx.core.net.toUri
 import androidx.datastore.preferences.preferencesDataStore
 import androidx.media3.common.MediaItem
@@ -20,11 +25,10 @@ import androidx.navigation.NavController
 import androidx.sqlite.db.SimpleSQLiteQuery
 import com.maxrave.kotlinytmusicscraper.models.SongItem
 import com.maxrave.kotlinytmusicscraper.models.VideoItem
-import com.maxrave.kotlinytmusicscraper.models.musixmatch.MusixmatchTranslationLyricsResponse
 import com.maxrave.kotlinytmusicscraper.models.response.PipedResponse
-import com.maxrave.kotlinytmusicscraper.models.response.spotify.SpotifyLyricsResponse
 import com.maxrave.kotlinytmusicscraper.models.youtube.Transcript
 import com.maxrave.kotlinytmusicscraper.models.youtube.YouTubeInitialPage
+import com.maxrave.lyricsproviders.models.response.MusixmatchTranslationLyricsResponse
 import com.maxrave.simpmusic.R
 import com.maxrave.simpmusic.common.DownloadState
 import com.maxrave.simpmusic.common.SETTINGS_FILENAME
@@ -35,6 +39,7 @@ import com.maxrave.simpmusic.data.db.entities.SearchHistory
 import com.maxrave.simpmusic.data.db.entities.SongEntity
 import com.maxrave.simpmusic.data.model.browse.album.AlbumBrowse
 import com.maxrave.simpmusic.data.model.browse.album.Track
+import com.maxrave.simpmusic.data.model.browse.artist.ArtistBrowse
 import com.maxrave.simpmusic.data.model.browse.artist.ResultSong
 import com.maxrave.simpmusic.data.model.browse.artist.ResultVideo
 import com.maxrave.simpmusic.data.model.browse.playlist.PlaylistBrowse
@@ -49,6 +54,10 @@ import com.maxrave.simpmusic.data.model.searchResult.songs.Thumbnail
 import com.maxrave.simpmusic.data.model.searchResult.videos.VideosResult
 import com.maxrave.simpmusic.data.parser.toListThumbnail
 import com.maxrave.simpmusic.service.test.source.MergingMediaSourceFactory
+import com.maxrave.simpmusic.viewModel.ArtistScreenData
+import org.intellij.markdown.flavours.commonmark.CommonMarkFlavourDescriptor
+import org.intellij.markdown.html.HtmlGenerator
+import org.intellij.markdown.parser.MarkdownParser
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
@@ -71,9 +80,7 @@ fun Context.isMyServiceRunning(serviceClass: Class<out Service>) =
         false
     }
 
-fun SearchHistory.toQuery(): String {
-    return this.query
-}
+fun SearchHistory.toQuery(): String = this.query
 
 fun List<SearchHistory>.toQueryList(): ArrayList<String> {
     val list = ArrayList<String>()
@@ -83,8 +90,8 @@ fun List<SearchHistory>.toQueryList(): ArrayList<String> {
     return list
 }
 
-fun ResultSong.toTrack(): Track {
-    return Track(
+fun ResultSong.toTrack(): Track =
+    Track(
         album = album,
         artists = artists,
         duration = "",
@@ -101,10 +108,9 @@ fun ResultSong.toTrack(): Track {
         resultType = null,
         year = "",
     )
-}
 
-fun ResultVideo.toTrack(): Track {
-    return Track(
+fun ResultVideo.toTrack(): Track =
+    Track(
         album = null,
         artists = this.artists ?: listOf(),
         duration = this.duration,
@@ -115,16 +121,15 @@ fun ResultVideo.toTrack(): Track {
         thumbnails = this.thumbnails,
         title = this.title,
         videoId = this.videoId,
-        videoType = null,
+        videoType = this.views,
         category = null,
         feedbackTokens = null,
         resultType = null,
         year = "",
     )
-}
 
-fun SongsResult.toTrack(): Track {
-    return Track(
+fun SongsResult.toTrack(): Track =
+    Track(
         this.album,
         this.artists,
         this.duration ?: "",
@@ -141,10 +146,9 @@ fun SongsResult.toTrack(): Track {
         this.resultType,
         "",
     )
-}
 
-fun SongItem.toTrack(): Track {
-    return Track(
+fun SongItem.toTrack(): Track =
+    Track(
         album = this.album.let { Album(it?.id ?: "", it?.name ?: "") },
         artists = this.artists.map { artist -> Artist(id = artist.id ?: "", name = artist.name) },
         duration = this.duration.toString(),
@@ -161,10 +165,9 @@ fun SongItem.toTrack(): Track {
         resultType = null,
         year = null,
     )
-}
 
-fun VideoItem.toTrack(): Track {
-    return Track(
+fun VideoItem.toTrack(): Track =
+    Track(
         album = this.album.let { Album(it?.id ?: "", it?.name ?: "") },
         artists = this.artists.map { artist -> Artist(id = artist.id ?: "", name = artist.name) },
         duration = this.duration.toString(),
@@ -181,17 +184,12 @@ fun VideoItem.toTrack(): Track {
         resultType = null,
         year = null,
     )
-}
 
 @UnstableApi
-fun MediaItem.isSong(): Boolean {
-    return this.mediaMetadata.description?.contains(MergingMediaSourceFactory.isSong) == true
-}
+fun MediaItem.isSong(): Boolean = this.mediaMetadata.description?.contains(MergingMediaSourceFactory.isSong) == true
 
 @UnstableApi
-fun MediaItem.isVideo(): Boolean {
-    return this.mediaMetadata.description?.contains(MergingMediaSourceFactory.isVideo) == true
-}
+fun MediaItem.isVideo(): Boolean = this.mediaMetadata.description?.contains(MergingMediaSourceFactory.isVideo) == true
 
 @JvmName("SongItemtoTrack")
 fun List<SongItem>?.toListTrack(): ArrayList<Track> {
@@ -316,8 +314,8 @@ fun List<SongEntity>?.toArrayListTrack(): ArrayList<Track> {
     return listTrack
 }
 
-fun MediaItem?.toSongEntity(): SongEntity? {
-    return if (this != null) {
+fun MediaItem?.toSongEntity(): SongEntity? =
+    if (this != null) {
         SongEntity(
             videoId = this.mediaId,
             albumId = null,
@@ -341,28 +339,27 @@ fun MediaItem?.toSongEntity(): SongEntity? {
     } else {
         null
     }
-}
 
 @JvmName("MediaItemtoSongEntity")
 @UnstableApi
 fun SongEntity.toMediaItem(): MediaItem {
     val isSong = (this.thumbnails?.contains("w544") == true && this.thumbnails.contains("h544"))
-    return MediaItem.Builder()
+    return MediaItem
+        .Builder()
         .setMediaId(this.videoId)
         .setUri(this.videoId)
         .setCustomCacheKey(this.videoId)
         .setMediaMetadata(
-            MediaMetadata.Builder()
+            MediaMetadata
+                .Builder()
                 .setTitle(this.title)
                 .setArtist(this.artistName?.connectArtists())
                 .setArtworkUri(this.thumbnails?.toUri())
                 .setAlbumTitle(this.albumName)
                 .setDescription(
                     if (isSong) MergingMediaSourceFactory.isSong else MergingMediaSourceFactory.isVideo,
-                )
-                .build(),
-        )
-        .build()
+                ).build(),
+        ).build()
 }
 
 @JvmName("TracktoMediaItem")
@@ -375,24 +372,29 @@ fun Track.toMediaItem(): MediaItem {
         thumbUrl = Regex("([wh])120").replace(thumbUrl, "$1544")
     }
     val artistName: String = this.artists.toListName().connectArtists()
-    val isSong = (this.thumbnails?.last()?.height != 0 && this.thumbnails?.last()?.height == this.thumbnails?.last()?.width
-        && this.thumbnails?.last()?.height != null) && (!thumbUrl.contains("hq720") && !thumbUrl.contains("maxresdefault"))
-    return MediaItem.Builder()
+    val isSong =
+        (
+            this.thumbnails?.last()?.height != 0 &&
+                this.thumbnails?.last()?.height == this.thumbnails?.last()?.width &&
+                this.thumbnails?.last()?.height != null
+        ) &&
+            (!thumbUrl.contains("hq720") && !thumbUrl.contains("maxresdefault"))
+    return MediaItem
+        .Builder()
         .setMediaId(this.videoId)
         .setUri(this.videoId)
         .setCustomCacheKey(this.videoId)
         .setMediaMetadata(
-            MediaMetadata.Builder()
+            MediaMetadata
+                .Builder()
                 .setTitle(this.title)
                 .setArtist(this.artists.toListName().connectArtists())
                 .setArtworkUri(thumbUrl.toUri())
                 .setAlbumTitle(this.album?.name)
                 .setDescription(
                     if (isSong) MergingMediaSourceFactory.isSong else MergingMediaSourceFactory.isVideo,
-                )
-                .build(),
-        )
-        .build()
+                ).build(),
+        ).build()
 }
 
 @UnstableApi
@@ -445,8 +447,8 @@ fun ArrayList<VideosResult>.toListTrack(): ArrayList<Track> {
     return listTrack
 }
 
-fun Content.toTrack(): Track {
-    return Track(
+fun Content.toTrack(): Track =
+    Track(
         album = album,
         artists = artists ?: listOf(Artist("", "")),
         duration = "",
@@ -463,7 +465,6 @@ fun Content.toTrack(): Track {
         resultType = null,
         year = "",
     )
-}
 
 fun List<Track>.toListVideoId(): List<String> {
     val list = mutableListOf<String>()
@@ -473,8 +474,8 @@ fun List<Track>.toListVideoId(): List<String> {
     return list
 }
 
-fun AlbumBrowse.toAlbumEntity(id: String): AlbumEntity {
-    return AlbumEntity(
+fun AlbumBrowse.toAlbumEntity(id: String): AlbumEntity =
+    AlbumEntity(
         browseId = id,
         artistId = this.artists.toListId(),
         artistName = this.artists.toListName(),
@@ -489,10 +490,9 @@ fun AlbumBrowse.toAlbumEntity(id: String): AlbumEntity {
         type = this.type,
         year = this.year,
     )
-}
 
-fun PlaylistBrowse.toPlaylistEntity(): PlaylistEntity {
-    return PlaylistEntity(
+fun PlaylistBrowse.toPlaylistEntity(): PlaylistEntity =
+    PlaylistEntity(
         id = this.id,
         author = this.author.name,
         description = this.description ?: "",
@@ -504,12 +504,11 @@ fun PlaylistBrowse.toPlaylistEntity(): PlaylistEntity {
         trackCount = this.trackCount,
         tracks = this.tracks.toListVideoId(),
         year = this.year,
-        downloadState = DownloadState.STATE_NOT_DOWNLOADED
+        downloadState = DownloadState.STATE_NOT_DOWNLOADED,
     )
-}
 
-fun Track.addThumbnails(): Track {
-    return Track(
+fun Track.addThumbnails(): Track =
+    Track(
         album = this.album,
         artists = this.artists,
         duration = this.duration,
@@ -533,24 +532,21 @@ fun Track.addThumbnails(): Track {
         resultType = this.resultType,
         year = this.year,
     )
-}
 
-fun LyricsEntity.toLyrics(): Lyrics {
-    return Lyrics(
+fun LyricsEntity.toLyrics(): Lyrics =
+    Lyrics(
         error = this.error,
         lines = this.lines,
         syncType = this.syncType,
     )
-}
 
-fun Lyrics.toLyricsEntity(videoId: String): LyricsEntity {
-    return LyricsEntity(
+fun Lyrics.toLyricsEntity(videoId: String): LyricsEntity =
+    LyricsEntity(
         videoId = videoId,
         error = this.error,
         lines = this.lines,
         syncType = this.syncType,
     )
-}
 
 fun Collection<SongEntity>.toVideoIdList(): List<String> {
     val list = mutableListOf<String>()
@@ -559,6 +555,29 @@ fun Collection<SongEntity>.toVideoIdList(): List<String> {
     }
     return list
 }
+
+fun ArtistBrowse.toArtistScreenData(): ArtistScreenData =
+    ArtistScreenData(
+        title = this.name,
+        imageUrl = this.thumbnails?.lastOrNull()?.url,
+        subscribers = this.subscribers,
+        playCount = this.views,
+        isChannel = this.songs == null,
+        channelId = this.channelId,
+        radioParam = this.radioId,
+        shuffleParam = this.shuffleId,
+        description = this.description,
+        listSongParam = this.songs?.browseId,
+        popularSongs = this.songs?.results?.map { it.toTrack() } ?: emptyList(),
+        singles = this.singles,
+        albums = this.albums,
+        video =
+            this.video?.let { video ->
+                ArtistBrowse.Videos(video.map { it.toTrack() }, this.videoList)
+            },
+        related = this.related,
+        featuredOn = this.featuredOn ?: emptyList(),
+    )
 
 fun setEnabledAll(
     v: View,
@@ -605,7 +624,7 @@ fun <T> Iterable<T>.indexMap(): Map<T, Int> {
     return map
 }
 
-fun com.maxrave.kotlinytmusicscraper.models.lyrics.Lyrics.toLyrics(): Lyrics {
+fun com.maxrave.lyricsproviders.models.lyrics.Lyrics.toLyrics(): Lyrics {
     val lines: ArrayList<Line> = arrayListOf()
     if (this.lyrics != null) {
         this.lyrics?.lines?.forEach {
@@ -632,7 +651,7 @@ fun com.maxrave.kotlinytmusicscraper.models.lyrics.Lyrics.toLyrics(): Lyrics {
     }
 }
 
-fun SpotifyLyricsResponse.toLyrics(): Lyrics {
+fun com.maxrave.spotify.model.response.spotify.SpotifyLyricsResponse.toLyrics(): Lyrics {
     val lines: ArrayList<Line> = arrayListOf()
     this.lyrics.lines.forEach {
         lines.add(
@@ -651,8 +670,8 @@ fun SpotifyLyricsResponse.toLyrics(): Lyrics {
     )
 }
 
-fun PipedResponse.toTrack(videoId: String): Track {
-    return Track(
+fun PipedResponse.toTrack(videoId: String): Track =
+    Track(
         album = null,
         artists =
             listOf(
@@ -682,7 +701,6 @@ fun PipedResponse.toTrack(videoId: String): Track {
         resultType = null,
         year = "",
     )
-}
 
 fun YouTubeInitialPage.toTrack(): Track {
     val initialPage = this
@@ -701,7 +719,11 @@ fun YouTubeInitialPage.toTrack(): Track {
         isAvailable = false,
         isExplicit = false,
         likeStatus = null,
-        thumbnails = initialPage.videoDetails?.thumbnail?.thumbnails?.toListThumbnail() ?: listOf(),
+        thumbnails =
+            initialPage.videoDetails
+                ?.thumbnail
+                ?.thumbnails
+                ?.toListThumbnail() ?: listOf(),
         title = initialPage.videoDetails?.title ?: "",
         videoId = initialPage.videoDetails?.videoId ?: "",
         videoType = "",
@@ -713,7 +735,9 @@ fun YouTubeInitialPage.toTrack(): Track {
 }
 
 fun MusixmatchTranslationLyricsResponse.toLyrics(originalLyrics: Lyrics): Lyrics? {
-    if (this.message.body.translations_list.isEmpty()) {
+    if (this.message.body.translations_list
+            .isEmpty()
+    ) {
         return null
     } else {
         val listTranslation = this.message.body.translations_list
@@ -724,9 +748,13 @@ fun MusixmatchTranslationLyricsResponse.toLyrics(originalLyrics: Lyrics): Lyrics
                         line.copy(
                             words =
                                 if (!line.words.contains("♫")) {
-                                    listTranslation.find {
-                                        it.translation.matched_line == line.words || it.translation.subtitle_matched_line == line.words || it.translation.snippet == line.words
-                                    }?.translation?.description
+                                    listTranslation
+                                        .find {
+                                            it.translation.matched_line == line.words ||
+                                                it.translation.subtitle_matched_line == line.words ||
+                                                it.translation.snippet == line.words
+                                        }?.translation
+                                        ?.description
                                         ?: ""
                                 } else {
                                     line.words
@@ -769,8 +797,8 @@ fun NavController.navigateSafe(
     }
 }
 
-fun PodcastBrowse.EpisodeItem.toTrack(): Track {
-    return Track(
+fun PodcastBrowse.EpisodeItem.toTrack(): Track =
+    Track(
         album = null,
         artists = listOf(this.author),
         duration = this.durationString,
@@ -787,7 +815,6 @@ fun PodcastBrowse.EpisodeItem.toTrack(): Track {
         resultType = "Podcast",
         year = this.createdDay,
     )
-}
 
 @JvmName("PodcastBrowseEpisodeItemtoListTrack")
 fun List<PodcastBrowse.EpisodeItem>.toListTrack(): ArrayList<Track> {
@@ -869,12 +896,16 @@ fun LocalDateTime.formatTimeAgo(context: Context): String {
     }
 }
 
-fun formatDuration(duration: Long): String {
+fun formatDuration(
+    duration: Long,
+    context: Context,
+): String {
+    if (duration < 0L) return context.getString(R.string.na_na)
     val minutes: Long = TimeUnit.MINUTES.convert(duration, TimeUnit.MILLISECONDS)
     val seconds: Long = (
         TimeUnit.SECONDS.convert(duration, TimeUnit.MILLISECONDS) -
             minutes * TimeUnit.SECONDS.convert(1, TimeUnit.MINUTES)
-        )
+    )
     return String.format(Locale.ENGLISH, "%02d:%02d", minutes, seconds)
 }
 
@@ -922,3 +953,53 @@ fun String.toSQLiteQuery(): SimpleSQLiteQuery = SimpleSQLiteQuery(this)
 fun InputStream.zipInputStream(): ZipInputStream = ZipInputStream(this)
 
 fun OutputStream.zipOutputStream(): ZipOutputStream = ZipOutputStream(this)
+
+fun Long?.bytesToMB(): Long {
+    val mbInBytes = 1024 * 1024
+    return this?.div(mbInBytes) ?: 0L
+}
+
+fun getSizeOfFile(dir: File): Long {
+    var dirSize: Long = 0
+    if (!dir.listFiles().isNullOrEmpty()) {
+        for (f in dir.listFiles()!!) {
+            dirSize += f.length()
+            if (f.isDirectory) {
+                dirSize += getSizeOfFile(f)
+            }
+        }
+    }
+    return dirSize
+}
+
+fun isNetworkAvailable(context: Context?): Boolean {
+    val connectivityManager = context?.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    // Returns a Network object corresponding to
+    // the currently active default data network.
+    val network = connectivityManager.activeNetwork ?: return false
+
+    // Representation of the capabilities of an active network.
+    val activeNetwork = connectivityManager.getNetworkCapabilities(network) ?: return false
+
+    return when {
+        // Indicates this network uses a Wi-Fi transport,
+        // or WiFi has network connectivity
+        activeNetwork.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> true
+
+        // Indicates this network uses a Cellular transport. or
+        // Cellular has network connectivity
+        activeNetwork.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> true
+
+        // else return false
+        else -> false
+    }
+}
+
+fun markdownToHtml(markdown: String): Spanned {
+    val src = markdown.trimIndent()
+    val flavour = CommonMarkFlavourDescriptor()
+    val parsedTree = MarkdownParser(flavour).buildMarkdownTreeFromString(src)
+    val html = HtmlGenerator(src, parsedTree, flavour).generateHtml()
+    Log.w("markdownToHtml", html)
+    return Html.fromHtml(html, Html.FROM_HTML_MODE_COMPACT)
+}

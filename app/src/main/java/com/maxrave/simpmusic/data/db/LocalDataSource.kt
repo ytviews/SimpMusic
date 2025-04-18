@@ -22,6 +22,8 @@ import java.time.LocalDateTime
 class LocalDataSource(
     private val databaseDao: DatabaseDao,
 ) {
+    fun checkpoint() = databaseDao.checkpoint()
+
     suspend fun getAllRecentData() = databaseDao.getAllRecentData()
 
     suspend fun getAllDownloadedPlaylist() = databaseDao.getAllDownloadedPlaylist()
@@ -43,6 +45,8 @@ class LocalDataSource(
         primaryKeyList: List<String>,
         offset: Int,
     ) = databaseDao.getSongByListVideoId(primaryKeyList, offset)
+
+    suspend fun getCanvasSong(max: Int) = databaseDao.getCanvasSong(max)
 
     suspend fun getSongByListVideoIdFull(primaryKeyList: List<String>) = databaseDao.getSongByListVideoIdFull(primaryKeyList)
 
@@ -71,6 +75,11 @@ class LocalDataSource(
 
     suspend fun updateListenCount(videoId: String) = databaseDao.updateTotalPlayTime(videoId)
 
+    suspend fun updateCanvasUrl(
+        videoId: String,
+        canvasUrl: String,
+    ) = databaseDao.updateCanvasUrl(videoId, canvasUrl)
+
     suspend fun updateLiked(
         liked: Int,
         videoId: String,
@@ -96,6 +105,11 @@ class LocalDataSource(
     suspend fun getAllArtists() = databaseDao.getAllArtists()
 
     suspend fun insertArtist(artist: ArtistEntity) = databaseDao.insertArtist(artist)
+
+    suspend fun updateArtistImage(
+        channelId: String,
+        thumbnails: String,
+    ) = databaseDao.updateArtistImage(channelId, thumbnails)
 
     suspend fun updateFollowed(
         followed: Int,
@@ -139,6 +153,8 @@ class LocalDataSource(
     suspend fun getAllPlaylists() = databaseDao.getAllPlaylists()
 
     suspend fun insertPlaylist(playlist: PlaylistEntity) = databaseDao.insertPlaylist(playlist)
+
+    suspend fun insertAndReplacePlaylist(playlist: PlaylistEntity) = databaseDao.insertAndReplacePlaylist(playlist)
 
     suspend fun insertRadioPlaylist(playlist: PlaylistEntity) = databaseDao.insertRadioPlaylist(playlist)
 

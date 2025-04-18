@@ -7,6 +7,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.animation.AnimationUtils
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -30,7 +31,6 @@ import dev.chrisbanes.insetter.applyInsetter
 import kotlinx.coroutines.runBlocking
 
 class LogInFragment : Fragment() {
-
     private var _binding: FragmentLogInBinding? = null
     val binding get() = _binding!!
 
@@ -39,14 +39,19 @@ class LogInFragment : Fragment() {
     private val sharedViewModel by activityViewModels<SharedViewModel>()
 
     override fun onCreateView(
-        inflater: LayoutInflater, container: ViewGroup?,
+        inflater: LayoutInflater,
+        container: ViewGroup?,
         savedInstanceState: Bundle?,
     ): View {
         _binding = FragmentLogInBinding.inflate(inflater, container, false)
         return binding.root
     }
 
-    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+    @SuppressLint("SetJavaScriptEnabled")
+    override fun onViewCreated(
+        view: View,
+        savedInstanceState: Bundle?,
+    ) {
         super.onViewCreated(view, savedInstanceState)
         binding.topAppBarLayout.applyInsetter {
             type(statusBars = true) {
@@ -59,44 +64,66 @@ class LogInFragment : Fragment() {
         bottom.visibility = View.GONE
         miniplayer.visibility = View.GONE
         binding.webView.apply {
-            webViewClient = object : WebViewClient() {
-                @SuppressLint("FragmentLiveDataObserve")
-                @UnstableApi
-                override fun onPageFinished(view: WebView?, url: String?) {
-                    if (url == Config.YOUTUBE_MUSIC_MAIN_URL) {
-                        CookieManager.getInstance().getCookie(url)?.let {
-                            viewModel.saveCookie(it)
-                        }
-                        WebStorage.getInstance().deleteAllData()
+            webViewClient =
+                object : WebViewClient() {
+                    @SuppressLint("FragmentLiveDataObserve")
+                    @UnstableApi
+                    override fun onPageFinished(
+                        view: WebView?,
+                        url: String?,
+                    ) {
+                        loadUrl("javascript:Android.onRetrieveVisitorData(window.yt.config_.VISITOR_DATA)")
+                        loadUrl("javascript:Android.onRetrieveDataSyncId(window.yt.config_.DATASYNC_ID)")
+                        if (url == Config.YOUTUBE_MUSIC_MAIN_URL) {
+                            CookieManager.getInstance().getCookie(url)?.let {
+                                settingsViewModel.addAccount(it)
+                            }
+                            WebStorage.getInstance().deleteAllData()
 
-                        // Clear all the cookies
-                        CookieManager.getInstance().removeAllCookies(null)
-                        CookieManager.getInstance().flush()
+                            // Clear all the cookies
+                            CookieManager.getInstance().removeAllCookies(null)
+                            CookieManager.getInstance().flush()
 
-                        binding.webView.clearCache(true)
-                        binding.webView.clearFormData()
-                        binding.webView.clearHistory()
-                        binding.webView.clearSslPreferences()
-                        viewModel.status.observe(this@LogInFragment) {
-                            if (it) {
-                                settingsViewModel.addAccount()
-                                Toast.makeText(
+                            binding.webView.clearCache(true)
+                            binding.webView.clearFormData()
+                            binding.webView.clearHistory()
+                            binding.webView.clearSslPreferences()
+                            Toast
+                                .makeText(
                                     requireContext(),
                                     R.string.login_success,
-                                    Toast.LENGTH_SHORT
+                                    Toast.LENGTH_SHORT,
                                 ).show()
-                                findNavController().popBackStack()
-                            }
+                            findNavController().navigateUp()
                         }
                     }
                 }
-            }
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
+            addJavascriptInterface(
+                object {
+                    @JavascriptInterface
+                    @UnstableApi
+                    fun onRetrieveVisitorData(newVisitorData: String?) {
+                        if (newVisitorData != null) {
+                            viewModel.setVisitorData(newVisitorData)
+                        }
+                    }
+
+                    @JavascriptInterface
+                    @UnstableApi
+                    fun onRetrieveDataSyncId(newDataSyncId: String?) {
+                        if (newDataSyncId != null) {
+                            viewModel.setDataSyncId(newDataSyncId.substringBefore("||"))
+                        }
+                    }
+                },
+                "Android",
+            )
             loadUrl(Config.LOG_IN_URL)
         }
         binding.topAppBar.setNavigationOnClickListener {
-            findNavController().popBackStack()
+            findNavController().navigateUp()
         }
     }
 

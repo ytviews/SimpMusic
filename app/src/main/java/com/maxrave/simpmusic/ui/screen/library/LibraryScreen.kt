@@ -2,6 +2,7 @@ package com.maxrave.simpmusic.ui.screen.library
 
 import android.content.res.Configuration
 import android.util.Log
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
@@ -37,11 +38,12 @@ import org.koin.androidx.compose.koinViewModel
 fun LibraryScreen(
     innerPadding: PaddingValues,
     viewModel: LibraryViewModel = koinViewModel(),
-    navController: NavController
+    navController: NavController,
 ) {
     val loggedIn by viewModel.youtubeLoggedIn.collectAsStateWithLifecycle(initialValue = false)
     val nowPlaying by viewModel.nowPlayingVideoId.collectAsState()
     val youTubePlaylist by viewModel.youTubePlaylist.collectAsState()
+    val listCanvasSong by viewModel.listCanvasSong.collectAsState()
     val yourLocalPlaylist by viewModel.yourLocalPlaylist.collectAsState()
     val favoritePlaylist by viewModel.favoritePlaylist.collectAsState()
     val downloadedPlaylist by viewModel.downloadedPlaylist.collectAsState()
@@ -51,6 +53,7 @@ fun LibraryScreen(
         if (youTubePlaylist.data.isNullOrEmpty()) {
             viewModel.getYouTubePlaylist()
         }
+        viewModel.getCanvasSong()
         viewModel.getLocalPlaylist()
         viewModel.getPlaylistFavorite()
         viewModel.getDownloadedPlaylist()
@@ -71,57 +74,80 @@ fun LibraryScreen(
             LibraryTilingBox(navController)
         }
         item {
+            AnimatedVisibility(!listCanvasSong.data.isNullOrEmpty()) {
+                LibraryItem(
+                    state =
+                        LibraryItemState(
+                            type = LibraryItemType.CanvasSong,
+                            data = listCanvasSong.data ?: emptyList(),
+                            isLoading = listCanvasSong is LocalResource.Loading,
+                        ),
+                    navController = navController,
+                )
+            }
+        }
+        item {
             LibraryItem(
-                state = LibraryItemState(
-                    type = LibraryItemType.YouTubePlaylist(loggedIn) {
-                        viewModel.getYouTubePlaylist()
-                    },
-                    data = youTubePlaylist.data ?: emptyList(),
-                    isLoading = youTubePlaylist is LocalResource.Loading,
-                ),
-                navController = navController
+                state =
+                    LibraryItemState(
+                        type =
+                            LibraryItemType.YouTubePlaylist(loggedIn) {
+                                viewModel.getYouTubePlaylist()
+                            },
+                        data = youTubePlaylist.data ?: emptyList(),
+                        isLoading = youTubePlaylist is LocalResource.Loading,
+                    ),
+                navController = navController,
             )
         }
         item {
             LibraryItem(
-                state = LibraryItemState(
-                    type = LibraryItemType.LocalPlaylist { newTitle ->
-                        viewModel.createPlaylist(newTitle)
-                    },
-                    data = yourLocalPlaylist.data ?: emptyList(),
-                    isLoading = yourLocalPlaylist is LocalResource.Loading,
-                ),
-                navController = navController
+                state =
+                    LibraryItemState(
+                        type =
+                            LibraryItemType.LocalPlaylist { newTitle ->
+                                viewModel.createPlaylist(newTitle)
+                            },
+                        data = yourLocalPlaylist.data ?: emptyList(),
+                        isLoading = yourLocalPlaylist is LocalResource.Loading,
+                    ),
+                navController = navController,
             )
         }
         item {
             LibraryItem(
-                state = LibraryItemState(
-                    type = LibraryItemType.FavoritePlaylist,
-                    data = favoritePlaylist.data ?: emptyList(),
-                    isLoading = favoritePlaylist is LocalResource.Loading,
-                ),
-                navController = navController
+                state =
+                    LibraryItemState(
+                        type = LibraryItemType.FavoritePlaylist,
+                        data = favoritePlaylist.data ?: emptyList(),
+                        isLoading = favoritePlaylist is LocalResource.Loading,
+                    ),
+                navController = navController,
             )
         }
         item {
             LibraryItem(
-                state = LibraryItemState(
-                    type = LibraryItemType.DownloadedPlaylist,
-                    data = downloadedPlaylist.data ?: emptyList(),
-                    isLoading = downloadedPlaylist is LocalResource.Loading,
-                ),
-                navController = navController
+                state =
+                    LibraryItemState(
+                        type = LibraryItemType.DownloadedPlaylist,
+                        data = downloadedPlaylist.data ?: emptyList(),
+                        isLoading = downloadedPlaylist is LocalResource.Loading,
+                    ),
+                navController = navController,
             )
         }
         item {
             LibraryItem(
-                state = LibraryItemState(
-                    type = LibraryItemType.RecentlyAdded(
-                        playingVideoId = nowPlaying
-                    ), data = recentlyAdded.data ?: emptyList(), isLoading = recentlyAdded is LocalResource.Loading
-                ),
-                navController = navController
+                state =
+                    LibraryItemState(
+                        type =
+                            LibraryItemType.RecentlyAdded(
+                                playingVideoId = nowPlaying,
+                            ),
+                        data = recentlyAdded.data ?: emptyList(),
+                        isLoading = recentlyAdded is LocalResource.Loading,
+                    ),
+                navController = navController,
             )
         }
         item {
@@ -134,7 +160,7 @@ fun LibraryScreen(
                 text = stringResource(R.string.library),
                 style = typo.titleMedium,
             )
-        }
+        },
     )
 }
 

@@ -1,8 +1,8 @@
 package com.maxrave.simpmusic.data.model.browse.album
 
-
 import androidx.compose.runtime.Immutable
 import com.google.gson.annotations.SerializedName
+import com.maxrave.simpmusic.data.model.browse.artist.ResultAlbum
 import com.maxrave.simpmusic.data.model.searchResult.songs.Artist
 import com.maxrave.simpmusic.data.model.searchResult.songs.Thumbnail
 
@@ -29,5 +29,6 @@ data class AlbumBrowse(
     @SerializedName("type")
     val type: String,
     @SerializedName("year")
-    val year: String?
+    val year: String?,
+    val otherVersion: List<ResultAlbum> = emptyList(),
 )

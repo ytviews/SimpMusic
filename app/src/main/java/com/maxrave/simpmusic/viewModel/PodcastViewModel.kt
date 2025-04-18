@@ -10,15 +10,10 @@ import com.maxrave.simpmusic.viewModel.base.BaseViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.koin.android.annotation.KoinViewModel
 
-@KoinViewModel
 class PodcastViewModel(
     application: Application,
 ) : BaseViewModel(application) {
-    override val tag: String
-        get() = "PodcastViewModel"
-
     var gradientDrawable: MutableLiveData<GradientDrawable?> = MutableLiveData()
     var loading = MutableLiveData<Boolean>()
     var id = MutableLiveData<String>()

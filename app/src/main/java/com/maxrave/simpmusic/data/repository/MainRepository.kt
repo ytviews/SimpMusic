@@ -11,23 +11,30 @@ import com.maxrave.kotlinytmusicscraper.models.MusicShelfRenderer
 import com.maxrave.kotlinytmusicscraper.models.SearchSuggestions
 import com.maxrave.kotlinytmusicscraper.models.SongItem
 import com.maxrave.kotlinytmusicscraper.models.WatchEndpoint
-import com.maxrave.kotlinytmusicscraper.models.musixmatch.MusixmatchCredential
-import com.maxrave.kotlinytmusicscraper.models.musixmatch.MusixmatchTranslationLyricsResponse
-import com.maxrave.kotlinytmusicscraper.models.musixmatch.SearchMusixmatchResponse
+import com.maxrave.kotlinytmusicscraper.models.YouTubeLocale
+import com.maxrave.kotlinytmusicscraper.models.response.DownloadProgress
 import com.maxrave.kotlinytmusicscraper.models.response.LikeStatus
 import com.maxrave.kotlinytmusicscraper.models.response.SearchResponse
-import com.maxrave.kotlinytmusicscraper.models.response.spotify.CanvasResponse
 import com.maxrave.kotlinytmusicscraper.models.simpmusic.GithubResponse
 import com.maxrave.kotlinytmusicscraper.models.sponsorblock.SkipSegments
 import com.maxrave.kotlinytmusicscraper.models.youtube.YouTubeInitialPage
 import com.maxrave.kotlinytmusicscraper.pages.BrowseResult
+import com.maxrave.kotlinytmusicscraper.pages.NextPage
 import com.maxrave.kotlinytmusicscraper.pages.PlaylistPage
 import com.maxrave.kotlinytmusicscraper.pages.SearchPage
+import com.maxrave.kotlinytmusicscraper.parser.getPlaylistContinuation
+import com.maxrave.kotlinytmusicscraper.parser.getPlaylistRadioEndpoint
+import com.maxrave.kotlinytmusicscraper.parser.getPlaylistShuffleEndpoint
+import com.maxrave.lyricsproviders.LyricsClient
+import com.maxrave.lyricsproviders.models.response.MusixmatchCredential
+import com.maxrave.lyricsproviders.models.response.MusixmatchTranslationLyricsResponse
+import com.maxrave.lyricsproviders.models.response.SearchMusixmatchResponse
 import com.maxrave.simpmusic.R
 import com.maxrave.simpmusic.common.QUALITY
 import com.maxrave.simpmusic.common.VIDEO_QUALITY
 import com.maxrave.simpmusic.data.dataStore.DataStoreManager
 import com.maxrave.simpmusic.data.db.LocalDataSource
+import com.maxrave.simpmusic.data.db.MusicDatabase
 import com.maxrave.simpmusic.data.db.entities.AlbumEntity
 import com.maxrave.simpmusic.data.db.entities.ArtistEntity
 import com.maxrave.simpmusic.data.db.entities.FollowedArtistSingleAndAlbum
@@ -86,30 +93,195 @@ import com.maxrave.simpmusic.data.parser.toListThumbnail
 import com.maxrave.simpmusic.data.type.PlaylistType
 import com.maxrave.simpmusic.data.type.RecentlyType
 import com.maxrave.simpmusic.extension.bestMatchingIndex
+import com.maxrave.simpmusic.extension.isNetworkAvailable
 import com.maxrave.simpmusic.extension.toListTrack
 import com.maxrave.simpmusic.extension.toLyrics
 import com.maxrave.simpmusic.extension.toTrack
 import com.maxrave.simpmusic.service.test.source.MergingMediaSourceFactory
 import com.maxrave.simpmusic.utils.Resource
 import com.maxrave.simpmusic.viewModel.FilterState
+import com.maxrave.spotify.Spotify
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import okhttp3.CacheControl
+import okhttp3.Interceptor
+import okhttp3.Request
+import okhttp3.Response
+import java.io.File
 import java.time.LocalDateTime
+import kotlin.collections.firstOrNull
 import kotlin.math.abs
 
 class MainRepository(
     private val localDataSource: LocalDataSource,
     private val dataStoreManager: DataStoreManager,
+    private val youTube: YouTube,
+    private val spotify: Spotify,
+    private val lyricsClient: LyricsClient,
+    private val database: MusicDatabase,
     private val context: Context,
 ) {
+    var init = false
+
+    fun initYouTube(scope: CoroutineScope) {
+        if (init) return
+        init = true
+        youTube.cacheControlInterceptor =
+            object : Interceptor {
+                override fun intercept(chain: Interceptor.Chain): Response {
+                    val originalResponse = chain.proceed(chain.request())
+                    if (isNetworkAvailable(context)) {
+                        val maxAge = 60 // read from cache for 1 minute
+                        return originalResponse
+                            .newBuilder()
+                            .header("Cache-Control", "public, max-age=$maxAge")
+                            .build()
+                    } else {
+                        val maxStale = 60 * 60 * 24 * 28 // tolerate 4-weeks stale
+                        return originalResponse
+                            .newBuilder()
+                            .header("Cache-Control", "public, only-if-cached, max-stale=$maxStale")
+                            .build()
+                    }
+                }
+            }
+        youTube.forceCacheInterceptor =
+            Interceptor { chain ->
+                val builder: Request.Builder = chain.request().newBuilder()
+                if (!isNetworkAvailable(context)) {
+                    builder.cacheControl(CacheControl.FORCE_CACHE)
+                }
+                chain.proceed(builder.build())
+            }
+        youTube.cachePath = File(context.cacheDir, "http-cache")
+        scope.launch {
+            val resetSpotifyToken =
+                launch {
+                    dataStoreManager.setSpotifyClientToken("")
+                    dataStoreManager.setSpotifyPersonalToken("")
+                    dataStoreManager.setSpotifyClientTokenExpires(System.currentTimeMillis())
+                    dataStoreManager.setSpotifyPersonalTokenExpires(System.currentTimeMillis())
+                }
+            val localeJob =
+                launch {
+                    combine(dataStoreManager.location, dataStoreManager.language) { location, language ->
+                        Pair(location, language)
+                    }.collectLatest { (location, language) ->
+                        youTube.locale =
+                            YouTubeLocale(
+                                location,
+                                try {
+                                    language.substring(0..1)
+                                } catch (e: Exception) {
+                                    "en"
+                                },
+                            )
+                    }
+                }
+            val ytCookieJob =
+                launch {
+                    dataStoreManager.cookie.distinctUntilChanged().collectLatest { cookie ->
+                        if (cookie.isNotEmpty()) {
+                            youTube.cookie = cookie
+                            youTube.visitorData()?.let {
+                                youTube.visitorData = it
+                            }
+                        } else {
+                            youTube.cookie = null
+                        }
+                    }
+                }
+            val musixmatchCookieJob =
+                launch {
+                    dataStoreManager.musixmatchCookie.collectLatest { cookie ->
+                        lyricsClient.musixmatchCookie = cookie
+                    }
+                }
+            val usingProxy =
+                launch {
+                    combine(
+                        dataStoreManager.usingProxy,
+                        dataStoreManager.proxyType,
+                        dataStoreManager.proxyHost,
+                        dataStoreManager.proxyPort,
+                    ) { usingProxy, proxyType, proxyHost, proxyPort ->
+                        Pair(usingProxy == DataStoreManager.TRUE, Triple(proxyType, proxyHost, proxyPort))
+                    }.collectLatest { (usingProxy, data) ->
+                        if (usingProxy) {
+                            withContext(Dispatchers.IO) {
+                                youTube.setProxy(
+                                    data.first == DataStoreManager.Settings.ProxyType.PROXY_TYPE_HTTP,
+                                    data.second,
+                                    data.third,
+                                )
+                                spotify.setProxy(
+                                    data.first == DataStoreManager.Settings.ProxyType.PROXY_TYPE_HTTP,
+                                    data.second,
+                                    data.third,
+                                )
+                                lyricsClient.setProxy(
+                                    data.first == DataStoreManager.Settings.ProxyType.PROXY_TYPE_HTTP,
+                                    data.second,
+                                    data.third,
+                                )
+                            }
+                        } else {
+                            youTube.removeProxy()
+                            spotify.removeProxy()
+                            lyricsClient.removeProxy()
+                        }
+                    }
+                }
+            val dataSyncIdJob =
+                launch {
+                    dataStoreManager.dataSyncId.collectLatest { dataSyncId ->
+                        youTube.dataSyncId = dataSyncId
+                    }
+                }
+            val visitorDataJob =
+                launch {
+                    dataStoreManager.visitorData.collectLatest { visitorData ->
+                        youTube.visitorData = visitorData
+                    }
+                }
+
+            localeJob.join()
+            ytCookieJob.join()
+            musixmatchCookieJob.join()
+            usingProxy.join()
+            dataSyncIdJob.join()
+            visitorDataJob.join()
+            resetSpotifyToken.join()
+        }
+    }
+
+    fun getMusixmatchCookie() = lyricsClient.musixmatchCookie
+
+    fun getYouTubeCookie() = youTube.cookie
+
     // Database
+    fun closeDatabase() {
+        if (database.isOpen) {
+            database.close()
+        }
+    }
+
+    fun getDatabasePath() = database.openHelper.writableDatabase.path
+
+    fun databaseDaoCheckpoint() = localDataSource.checkpoint()
+
     fun getSearchHistory(): Flow<List<SearchHistory>> =
         flow {
             emit(localDataSource.getSearchHistory())
@@ -168,6 +340,11 @@ class MainRepository(
             emit(localDataSource.getLibrarySongs())
         }.flowOn(Dispatchers.IO)
 
+    fun getCanvasSong(max: Int): Flow<List<SongEntity>> =
+        flow {
+            emit(localDataSource.getCanvasSong(max))
+        }.flowOn(Dispatchers.IO)
+
     fun getSongById(id: String): Flow<SongEntity?> =
         flow {
             emit(localDataSource.getSong(id))
@@ -186,6 +363,13 @@ class MainRepository(
         withContext(Dispatchers.IO) {
             localDataSource.updateListenCount(videoId)
         }
+
+    suspend fun updateCanvasUrl(
+        videoId: String,
+        canvasUrl: String,
+    ) = withContext(Dispatchers.IO) {
+        localDataSource.updateCanvasUrl(videoId, canvasUrl)
+    }
 
     suspend fun updateLikeStatus(
         videoId: String,
@@ -234,6 +418,18 @@ class MainRepository(
             localDataSource.insertArtist(artistEntity)
         }
 
+    suspend fun updateArtistImage(
+        channelId: String,
+        thumbnail: String,
+    ) = withContext(
+        Dispatchers.Main,
+    ) {
+        localDataSource.updateArtistImage(
+            channelId,
+            thumbnail,
+        )
+    }
+
     suspend fun updateFollowedStatus(
         channelId: String,
         followedStatus: Int,
@@ -270,9 +466,10 @@ class MainRepository(
             emit(localDataSource.getLikedAlbums())
         }.flowOn(Dispatchers.IO)
 
-    fun insertAlbum(albumEntity: AlbumEntity) = flow {
-        emit(localDataSource.insertAlbum(albumEntity))
-    }.flowOn(Dispatchers.IO)
+    fun insertAlbum(albumEntity: AlbumEntity) =
+        flow {
+            emit(localDataSource.insertAlbum(albumEntity))
+        }.flowOn(Dispatchers.IO)
 
     suspend fun updateAlbumLiked(
         albumId: String,
@@ -310,6 +507,21 @@ class MainRepository(
 
     suspend fun insertPlaylist(playlistEntity: PlaylistEntity) = withContext(Dispatchers.IO) { localDataSource.insertPlaylist(playlistEntity) }
 
+    suspend fun insertAndReplacePlaylist(playlistEntity: PlaylistEntity) =
+        withContext(Dispatchers.IO) {
+            val oldPlaylist = getPlaylist(playlistEntity.id).firstOrNull()
+            if (oldPlaylist != null) {
+                localDataSource.insertAndReplacePlaylist(
+                    playlistEntity.copy(
+                        downloadState = oldPlaylist.downloadState,
+                        liked = oldPlaylist.liked,
+                    ),
+                )
+            } else {
+                localDataSource.insertAndReplacePlaylist(playlistEntity)
+            }
+        }
+
     suspend fun insertRadioPlaylist(playlistEntity: PlaylistEntity) =
         withContext(Dispatchers.IO) { localDataSource.insertRadioPlaylist(playlistEntity) }
 
@@ -345,7 +557,7 @@ class MainRepository(
 
     suspend fun getAllLocalPlaylists(): Flow<List<LocalPlaylistEntity>> = flow { emit(localDataSource.getAllLocalPlaylists()) }.flowOn(Dispatchers.IO)
 
-    suspend fun getLocalPlaylist(id: Long): Flow<LocalPlaylistEntity> = flow { emit(localDataSource.getLocalPlaylist(id)) }.flowOn(Dispatchers.IO)
+    suspend fun getLocalPlaylist(id: Long): Flow<LocalPlaylistEntity?> = flow { emit(localDataSource.getLocalPlaylist(id)) }.flowOn(Dispatchers.IO)
 
     suspend fun insertLocalPlaylist(localPlaylistEntity: LocalPlaylistEntity) =
         withContext(Dispatchers.IO) { localDataSource.insertLocalPlaylist(localPlaylistEntity) }
@@ -397,7 +609,8 @@ class MainRepository(
             emit(localDataSource.getAllRecentData())
         }.flowOn(Dispatchers.IO)
 
-    suspend fun getAllDownloadedPlaylist(): Flow<List<PlaylistType>> = flow { emit(localDataSource.getAllDownloadedPlaylist()) }.flowOn(Dispatchers.IO)
+    suspend fun getAllDownloadedPlaylist(): Flow<List<PlaylistType>> =
+        flow { emit(localDataSource.getAllDownloadedPlaylist()) }.flowOn(Dispatchers.IO)
 
     suspend fun getRecentSong(
         limit: Int,
@@ -447,7 +660,7 @@ class MainRepository(
             Dispatchers.IO,
         )
 
-    suspend fun insertSetVideoId(setVideoId: SetVideoIdEntity) = withContext(Dispatchers.IO) { localDataSource.insertSetVideoId(setVideoId) }
+    private suspend fun insertSetVideoId(setVideoId: SetVideoIdEntity) = withContext(Dispatchers.IO) { localDataSource.insertSetVideoId(setVideoId) }
 
     suspend fun getSetVideoId(videoId: String): Flow<SetVideoIdEntity?> = flow { emit(localDataSource.getSetVideoId(videoId)) }.flowOn(Dispatchers.IO)
 
@@ -523,7 +736,7 @@ class MainRepository(
     suspend fun updateGoogleAccountUsed(
         email: String,
         isUsed: Boolean,
-    ) = withContext(Dispatchers.IO) { localDataSource.updateGoogleAccountUsed(email, isUsed) }
+    ): Flow<Int> = flow { emit(localDataSource.updateGoogleAccountUsed(email, isUsed)) }.flowOn(Dispatchers.IO)
 
     suspend fun insertFollowedArtistSingleAndAlbum(followedArtistSingleAndAlbum: FollowedArtistSingleAndAlbum) =
         withContext(Dispatchers.IO) {
@@ -562,7 +775,7 @@ class MainRepository(
 
     suspend fun getAccountInfo() =
         flow<AccountInfo?> {
-            YouTube
+            youTube
                 .accountInfo()
                 .onSuccess { accountInfo ->
                     emit(accountInfo)
@@ -576,7 +789,7 @@ class MainRepository(
         flow {
             runCatching {
                 val limit = dataStoreManager.homeLimit.first()
-                YouTube
+                youTube
                     .customQuery(browseId = "FEmusic_home", params = params)
                     .onSuccess { result ->
                         val list: ArrayList<HomeItem> = arrayListOf()
@@ -675,7 +888,7 @@ class MainRepository(
                         list.addAll(parseMixedContent(data, context))
                         var count = 0
                         while (count < limit && continueParam != null) {
-                            YouTube
+                            youTube
                                 .customQuery(browseId = "", continuation = continueParam)
                                 .onSuccess { response ->
                                     continueParam =
@@ -707,7 +920,7 @@ class MainRepository(
 
     suspend fun getNewRelease(): Flow<Resource<ArrayList<HomeItem>>> =
         flow {
-            YouTube
+            youTube
                 .newRelease()
                 .onSuccess { result ->
                     emit(Resource.Success<ArrayList<HomeItem>>(parseNewRelease(result, context)))
@@ -719,7 +932,7 @@ class MainRepository(
     suspend fun getChartData(countryCode: String = "KR"): Flow<Resource<Chart>> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .customQuery("FEmusic_charts", country = countryCode)
                     .onSuccess { result ->
                         val data =
@@ -746,7 +959,7 @@ class MainRepository(
     suspend fun getMoodAndMomentsData(): Flow<Resource<Mood>> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .moodAndGenres()
                     .onSuccess { result ->
                         val listMoodMoments: ArrayList<MoodsMoment> = arrayListOf()
@@ -781,7 +994,7 @@ class MainRepository(
     suspend fun getMoodData(params: String): Flow<Resource<MoodsMomentObject>> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .customQuery(
                         browseId = "FEmusic_moods_and_genres_category",
                         params = params,
@@ -801,7 +1014,7 @@ class MainRepository(
     suspend fun getGenreData(params: String): Flow<Resource<GenreObject>> =
         flow {
             kotlin.runCatching {
-                YouTube
+                youTube
                     .customQuery(
                         browseId = "FEmusic_moods_and_genres_category",
                         params = params,
@@ -818,31 +1031,72 @@ class MainRepository(
             }
         }.flowOn(Dispatchers.IO)
 
-    suspend fun getContinueTrack(
+    fun getContinueTrack(
         playlistId: String,
         continuation: String,
+        fromPlaylist: Boolean = false,
     ): Flow<Pair<ArrayList<Track>?, String?>> =
         flow {
             runCatching {
                 var newContinuation: String? = null
                 newContinuation = null
-                YouTube
-                    .next(
-                        if (playlistId.startsWith("RRDAMVM")) {
-                            WatchEndpoint(videoId = playlistId.removePrefix("RRDAMVM"))
-                        } else {
-                            WatchEndpoint(playlistId = playlistId)
-                        },
-                        continuation = continuation,
-                    ).onSuccess { next ->
-                        val data: ArrayList<SongItem> = arrayListOf()
-                        data.addAll(next.items)
-                        newContinuation = next.continuation
-                        emit(Pair(data.toListTrack(), newContinuation))
-                    }.onFailure { exception ->
-                        exception.printStackTrace()
-                        emit(Pair(null, null))
-                    }
+                Log.d("getContinueTrack", "playlistId: $playlistId")
+                Log.d("getContinueTrack", "continuation: $continuation")
+                if (!fromPlaylist) {
+                    youTube
+                        .next(
+                            if (playlistId.startsWith("RRDAMVM")) {
+                                WatchEndpoint(videoId = playlistId.removePrefix("RRDAMVM"))
+                            } else {
+                                WatchEndpoint(playlistId = playlistId)
+                            },
+                            continuation = continuation,
+                        ).onSuccess { next ->
+                            val data: ArrayList<SongItem> = arrayListOf()
+                            data.addAll(next.items)
+                            newContinuation = next.continuation
+                            emit(Pair(data.toListTrack(), newContinuation))
+                        }.onFailure { exception ->
+                            exception.printStackTrace()
+                            emit(Pair(null, null))
+                        }
+                } else {
+                    youTube
+                        .customQuery(
+                            browseId = null,
+                            continuation = continuation,
+                            setLogin = true,
+                        ).onSuccess { values ->
+                            Log.d("getPlaylistData", "continue: $continuation")
+                            Log.d(
+                                "getPlaylistData",
+                                "values: ${values.onResponseReceivedActions}",
+                            )
+                            val dataMore: List<SongItem> =
+                                values.onResponseReceivedActions
+                                    ?.firstOrNull()
+                                    ?.appendContinuationItemsAction
+                                    ?.continuationItems
+                                    ?.apply {
+                                        Log.w("getContinueTrack", "dataMore: ${this.size}")
+                                    }?.mapNotNull {
+                                        NextPage.fromMusicResponsiveListItemRenderer(
+                                            it.musicResponsiveListItemRenderer ?: return@mapNotNull null,
+                                        )
+                                    } ?: emptyList()
+                            newContinuation =
+                                values.getPlaylistContinuation()
+                            emit(
+                                Pair<ArrayList<Track>?, String?>(
+                                    dataMore.toListTrack(),
+                                    newContinuation,
+                                ),
+                            )
+                        }.onFailure {
+                            Log.e("getContinueTrack", "Error: ${it.message}")
+                            emit(Pair(null, null))
+                        }
+                }
             }
         }
 
@@ -851,80 +1105,84 @@ class MainRepository(
         originalTrack: SongEntity? = null,
         artist: ArtistEntity? = null,
     ): Flow<Resource<Pair<PlaylistBrowse, String?>>> =
-        flow {
-            runCatching {
-                YouTube
-                    .next(endpoint = WatchEndpoint(playlistId = radioId))
-                    .onSuccess { next ->
-                        Log.w("Radio", "Title: ${next.title}")
-                        val data: ArrayList<SongItem> = arrayListOf()
-                        data.addAll(next.items)
-                        var continuation = next.continuation
-                        Log.w("Radio", "data: ${data.size}")
-                        var count = 0
-                        while (continuation != null && count < 3) {
-                            YouTube
-                                .next(
-                                    endpoint = WatchEndpoint(playlistId = radioId),
-                                    continuation = continuation,
-                                ).onSuccess { nextContinue ->
-                                    data.addAll(nextContinue.items)
-                                    continuation = nextContinue.continuation
-                                    if (data.size >= 50) {
+        if (radioId.startsWith("RDAT")) {
+            getRDATRadioData(radioId)
+        } else {
+            flow {
+                runCatching {
+                    youTube
+                        .next(endpoint = WatchEndpoint(playlistId = radioId))
+                        .onSuccess { next ->
+                            Log.w("Radio", "Title: ${next.title}")
+                            val data: ArrayList<SongItem> = arrayListOf()
+                            data.addAll(next.items)
+                            var continuation = next.continuation
+                            Log.w("Radio", "data: ${data.size}")
+                            var count = 0
+                            while (continuation != null && count < 3) {
+                                youTube
+                                    .next(
+                                        endpoint = WatchEndpoint(playlistId = radioId),
+                                        continuation = continuation,
+                                    ).onSuccess { nextContinue ->
+                                        data.addAll(nextContinue.items)
+                                        continuation = nextContinue.continuation
+                                        if (data.size >= 50) {
+                                            count = 3
+                                        }
+                                        Log.w("Radio", "data: ${data.size}")
+                                        count++
+                                    }.onFailure {
                                         count = 3
                                     }
-                                    Log.w("Radio", "data: ${data.size}")
-                                    count++
-                                }.onFailure {
-                                    count = 3
-                                }
-                        }
-                        val listTrackResult = data.toListTrack()
-                        if (originalTrack != null) {
-                            listTrackResult.add(0, originalTrack.toTrack())
-                        }
-                        Log.w("Repository", "data: ${data.size}")
-                        val playlistBrowse =
-                            PlaylistBrowse(
-                                author = Author(id = "", name = "YouTube Music"),
-                                description =
-                                    context.getString(
-                                        R.string.auto_created_by_youtube_music,
-                                    ),
-                                duration = "",
-                                durationSeconds = 0,
-                                id = radioId,
-                                privacy = "PRIVATE",
-                                thumbnails =
-                                    listOf(
-                                        Thumbnail(
-                                            544,
-                                            originalTrack?.thumbnails ?: artist?.thumbnails ?: "",
-                                            544,
+                            }
+                            val listTrackResult = data.toListTrack()
+                            if (originalTrack != null) {
+                                listTrackResult.add(0, originalTrack.toTrack())
+                            }
+                            Log.w("Repository", "data: ${data.size}")
+                            val playlistBrowse =
+                                PlaylistBrowse(
+                                    author = Author(id = "", name = "YouTube Music"),
+                                    description =
+                                        context.getString(
+                                            R.string.auto_created_by_youtube_music,
                                         ),
-                                    ),
-                                title = "${originalTrack?.title ?: artist?.name} ${
-                                    context.getString(
-                                        R.string.radio,
-                                    )
-                                }",
-                                trackCount = listTrackResult.size,
-                                tracks = listTrackResult,
-                                year = LocalDateTime.now().year.toString(),
-                            )
-                        Log.w("Repository", "playlistBrowse: $playlistBrowse")
-                        emit(Resource.Success<Pair<PlaylistBrowse, String?>>(Pair(playlistBrowse, continuation)))
-                    }.onFailure { exception ->
-                        exception.printStackTrace()
-                        emit(Resource.Error<Pair<PlaylistBrowse, String?>>(exception.message.toString()))
-                    }
-            }
-        }.flowOn(Dispatchers.IO)
+                                    duration = "",
+                                    durationSeconds = 0,
+                                    id = radioId,
+                                    privacy = "PRIVATE",
+                                    thumbnails =
+                                        listOf(
+                                            Thumbnail(
+                                                544,
+                                                originalTrack?.thumbnails ?: artist?.thumbnails ?: "",
+                                                544,
+                                            ),
+                                        ),
+                                    title = "${originalTrack?.title ?: artist?.name} ${
+                                        context.getString(
+                                            R.string.radio,
+                                        )
+                                    }",
+                                    trackCount = listTrackResult.size,
+                                    tracks = listTrackResult,
+                                    year = LocalDateTime.now().year.toString(),
+                                )
+                            Log.w("Repository", "playlistBrowse: $playlistBrowse")
+                            emit(Resource.Success<Pair<PlaylistBrowse, String?>>(Pair(playlistBrowse, continuation)))
+                        }.onFailure { exception ->
+                            exception.printStackTrace()
+                            emit(Resource.Error<Pair<PlaylistBrowse, String?>>(exception.message.toString()))
+                        }
+                }
+            }.flowOn(Dispatchers.IO)
+        }
 
     suspend fun reloadSuggestionPlaylist(reloadParams: String): Flow<Pair<String?, ArrayList<Track>?>?> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .customQuery(browseId = "", continuation = reloadParams, setLogin = true)
                     .onSuccess { values ->
                         val data = values.continuationContents?.musicShelfContinuation?.contents
@@ -973,7 +1231,7 @@ class MainRepository(
                 } else {
                     id += ytPlaylistId
                 }
-                YouTube
+                youTube
                     .customQuery(browseId = id, setLogin = true)
                     .onSuccess { result ->
                         println(result)
@@ -1020,7 +1278,7 @@ class MainRepository(
                         var reloadParams: String? = null
                         println("continueParam: $continueParam")
                         while (continueParam != null) {
-                            YouTube
+                            youTube
                                 .customQuery(
                                     browseId = "",
                                     continuation = continueParam,
@@ -1092,7 +1350,7 @@ class MainRepository(
     suspend fun getPodcastData(podcastId: String): Flow<Resource<PodcastBrowse>> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .customQuery(browseId = podcastId)
                     .onSuccess { result ->
                         val listEpisode = arrayListOf<PodcastBrowse.EpisodeItem>()
@@ -1206,7 +1464,7 @@ class MainRepository(
                                 ?.nextContinuationData
                                 ?.continuation
                         while (continueParam != null) {
-                            YouTube
+                            youTube
                                 .customQuery(continuation = continueParam, browseId = "")
                                 .onSuccess { continueData ->
                                     parsePodcastContinueData(
@@ -1250,8 +1508,8 @@ class MainRepository(
             }
         }
 
-    suspend fun getRDATRadioData(radioId: String): Flow<Resource<Pair<PlaylistBrowse, String>>> =
-        flow<Resource<Pair<PlaylistBrowse, String>>> {
+    suspend fun getRDATRadioData(radioId: String): Flow<Resource<Pair<PlaylistBrowse, String?>>> =
+        flow<Resource<Pair<PlaylistBrowse, String?>>> {
             runCatching {
                 val id =
                     if (radioId.startsWith("VL")) {
@@ -1259,7 +1517,7 @@ class MainRepository(
                     } else {
                         "VL$radioId"
                     }
-                YouTube
+                youTube
                     .customQuery(browseId = id, setLogin = true)
                     .onSuccess { result ->
                         val listContent: ArrayList<MusicShelfRenderer.Content> = arrayListOf()
@@ -1316,69 +1574,13 @@ class MainRepository(
                                     ?.header
                                     ?.musicResponsiveHeaderRenderer
                         Log.d("Header", "header: $header")
-                        var continueParam =
-                            result.contents
-                                ?.singleColumnBrowseResultsRenderer
-                                ?.tabs
-                                ?.get(
-                                    0,
-                                )?.tabRenderer
-                                ?.content
-                                ?.sectionListRenderer
-                                ?.contents
-                                ?.get(
-                                    0,
-                                )?.musicPlaylistShelfRenderer
-                                ?.continuations
-                                ?.get(
-                                    0,
-                                )?.nextContinuationData
-                                ?.continuation
-                                ?: result.contents
-                                    ?.twoColumnBrowseResultsRenderer
-                                    ?.secondaryContents
-                                    ?.sectionListRenderer
-                                    ?.contents
-                                    ?.firstOrNull()
-                                    ?.musicPlaylistShelfRenderer
-                                    ?.continuations
-                                    ?.firstOrNull()
-                                    ?.nextContinuationData
-                                    ?.continuation
-                        var count = 0
+                        val finalContinueParam =
+                            result.getPlaylistContinuation()
                         Log.d("Repository", "playlist data: ${listContent.size}")
-                        Log.d("Repository", "continueParam: $continueParam")
+                        Log.d("Repository", "continueParam: $finalContinueParam")
 //                        else {
 //                            var listTrack = playlistBrowse.tracks.toMutableList()
-                        while (count < 1 && continueParam != null) {
-                            YouTube
-                                .customQuery(
-                                    browseId = "",
-                                    continuation = continueParam,
-                                    setLogin = true,
-                                ).onSuccess { values ->
-                                    Log.d("Continue", "continue: $continueParam")
-                                    val dataMore: List<MusicShelfRenderer.Content>? =
-                                        values.continuationContents?.musicPlaylistShelfContinuation?.contents
-                                    if (dataMore != null) {
-                                        listContent.addAll(dataMore)
-                                    }
-                                    continueParam =
-                                        values.continuationContents
-                                            ?.musicPlaylistShelfContinuation
-                                            ?.continuations
-                                            ?.get(
-                                                0,
-                                            )?.nextContinuationData
-                                            ?.continuation
-                                    count++
-                                }.onFailure {
-                                    Log.e("Continue", "Error: ${it.message}")
-                                    count = 3
-                                }
-                        }
                         Log.d("Repository", "playlist final data: ${listContent.size}")
-                        val finalContinueParam = continueParam
                         if (finalContinueParam != null) {
                             parsePlaylistData(header, listContent, radioId, context)?.let { playlist ->
                                 emit(
@@ -1402,7 +1604,7 @@ class MainRepository(
             }
         }.flowOn(Dispatchers.IO)
 
-    suspend fun getPlaylistData(playlistId: String): Flow<Resource<PlaylistBrowse>> =
+    fun getFullPlaylistData(playlistId: String): Flow<Resource<PlaylistBrowse>> =
         flow {
             runCatching {
                 var id = ""
@@ -1412,11 +1614,11 @@ class MainRepository(
                     } else {
                         playlistId
                     }
-                Log.d("Repository", "playlist id: $id")
-                YouTube
+                Log.d("getPlaylistData", "playlist id: $id")
+                youTube
                     .customQuery(browseId = id, setLogin = true)
                     .onSuccess { result ->
-                        val listContent: ArrayList<MusicShelfRenderer.Content> = arrayListOf()
+                        val listContent: ArrayList<Track> = arrayListOf()
                         val data: List<MusicShelfRenderer.Content>? =
                             result.contents
                                 ?.singleColumnBrowseResultsRenderer
@@ -1440,9 +1642,8 @@ class MainRepository(
                                     ?.musicPlaylistShelfRenderer
                                     ?.contents
                         if (data != null) {
-                            Log.d("Data", "data: $data")
-                            Log.d("Data", "data size: ${data.size}")
-                            listContent.addAll(data)
+                            Log.d("getPlaylistData", "data: $data")
+                            Log.d("getPlaylistData", "data size: ${data.size}")
                         }
                         val header =
                             result.header?.musicDetailHeaderRenderer
@@ -1469,8 +1670,85 @@ class MainRepository(
                                     ?.musicEditablePlaylistDetailHeaderRenderer
                                     ?.header
                                     ?.musicResponsiveHeaderRenderer
-                        Log.d("Header", "header: $header")
+                        Log.d("getPlaylistData", "header: $header")
                         var continueParam =
+                            result.getPlaylistContinuation()
+                        var count = 0
+                        Log.d("getPlaylistData", "playlist data: ${listContent.size}")
+                        Log.d("getPlaylistData", "continueParam: $continueParam")
+//                        else {
+//                            var listTrack = playlistBrowse.tracks.toMutableList()
+                        while (continueParam != null) {
+                            youTube
+                                .customQuery(
+                                    browseId = null,
+                                    continuation = continueParam,
+                                    setLogin = true,
+                                ).onSuccess { values ->
+                                    Log.d("getPlaylistData", "continue: $continueParam")
+                                    Log.d(
+                                        "getPlaylistData",
+                                        "values: ${values.onResponseReceivedActions}",
+                                    )
+                                    val dataMore: List<SongItem> =
+                                        values.onResponseReceivedActions
+                                            ?.firstOrNull()
+                                            ?.appendContinuationItemsAction
+                                            ?.continuationItems
+                                            ?.apply {
+                                                Log.w("getPlaylistData", "dataMore: ${this.size}")
+                                            }?.mapNotNull {
+                                                NextPage.fromMusicResponsiveListItemRenderer(
+                                                    it.musicResponsiveListItemRenderer ?: return@mapNotNull null,
+                                                )
+                                            } ?: emptyList()
+                                    listContent.addAll(dataMore.map { it.toTrack() })
+                                    continueParam =
+                                        values.getPlaylistContinuation()
+                                    count++
+                                }.onFailure {
+                                    Log.e("getPlaylistData", "Error: ${it.message}")
+                                    continueParam = null
+                                    count++
+                                }
+                        }
+                        Log.d("getPlaylistData", "playlist final data: ${listContent.size}")
+                        parsePlaylistData(header, data ?: emptyList(), playlistId, context)?.let { playlist ->
+                            emit(
+                                Resource.Success<PlaylistBrowse>(
+                                    playlist.copy(
+                                        tracks =
+                                            playlist.tracks.toMutableList().apply {
+                                                addAll(listContent)
+                                            },
+                                        trackCount = (playlist.trackCount + listContent.size),
+                                    ),
+                                ),
+                            )
+                        } ?: emit(Resource.Error<PlaylistBrowse>("Error"))
+                    }.onFailure { e ->
+                        Log.e("getPlaylistData", e.message ?: "Error")
+                        emit(Resource.Error<PlaylistBrowse>(e.message.toString()))
+                    }
+            }
+        }.flowOn(Dispatchers.IO)
+
+    fun getPlaylistData(playlistId: String): Flow<Resource<Pair<PlaylistBrowse, String?>>> =
+        flow {
+            runCatching {
+                var id = ""
+                id +=
+                    if (!playlistId.startsWith("VL")) {
+                        "VL$playlistId"
+                    } else {
+                        playlistId
+                    }
+                Log.d("getPlaylistData", "playlist id: $id")
+                youTube
+                    .customQuery(browseId = id, setLogin = true)
+                    .onSuccess { result ->
+                        val listContent: ArrayList<Track> = arrayListOf()
+                        val data: List<MusicShelfRenderer.Content>? =
                             result.contents
                                 ?.singleColumnBrowseResultsRenderer
                                 ?.tabs
@@ -1483,70 +1761,89 @@ class MainRepository(
                                 ?.get(
                                     0,
                                 )?.musicPlaylistShelfRenderer
-                                ?.continuations
-                                ?.get(
-                                    0,
-                                )?.nextContinuationData
-                                ?.continuation
+                                ?.contents
                                 ?: result.contents
                                     ?.twoColumnBrowseResultsRenderer
                                     ?.secondaryContents
                                     ?.sectionListRenderer
                                     ?.contents
-                                    ?.firstOrNull()
+                                    ?.get(0)
                                     ?.musicPlaylistShelfRenderer
-                                    ?.continuations
-                                    ?.firstOrNull()
-                                    ?.nextContinuationData
-                                    ?.continuation
-                        var count = 0
-                        Log.d("Repository", "playlist data: ${listContent.size}")
-                        Log.d("Repository", "continueParam: $continueParam")
-//                        else {
-//                            var listTrack = playlistBrowse.tracks.toMutableList()
-                        while (continueParam != null) {
-                            YouTube
-                                .customQuery(
-                                    browseId = "",
-                                    continuation = continueParam,
-                                    setLogin = true,
-                                ).onSuccess { values ->
-                                    Log.d("Continue", "continue: $continueParam")
-                                    val dataMore: List<MusicShelfRenderer.Content>? =
-                                        values.continuationContents?.musicPlaylistShelfContinuation?.contents
-                                    if (dataMore != null) {
-                                        listContent.addAll(dataMore)
-                                    }
-                                    continueParam =
-                                        values.continuationContents
-                                            ?.musicPlaylistShelfContinuation
-                                            ?.continuations
-                                            ?.get(
-                                                0,
-                                            )?.nextContinuationData
-                                            ?.continuation
-                                    count++
-                                }.onFailure {
-                                    Log.e("Continue", "Error: ${it.message}")
-                                    continueParam = null
-                                    count++
-                                }
+                                    ?.contents
+                        if (data != null) {
+                            Log.d("getPlaylistData", "data: $data")
+                            Log.d("getPlaylistData", "data size: ${data.size}")
                         }
-                        Log.d("Repository", "playlist final data: ${listContent.size}")
-                        parsePlaylistData(header, listContent, playlistId, context)?.let { playlist ->
-                            emit(Resource.Success<PlaylistBrowse>(playlist))
-                        } ?: emit(Resource.Error<PlaylistBrowse>("Error"))
+                        val header =
+                            result.header?.musicDetailHeaderRenderer
+                                ?: result.header?.musicEditablePlaylistDetailHeaderRenderer
+                                ?: result.contents
+                                    ?.twoColumnBrowseResultsRenderer
+                                    ?.tabs
+                                    ?.get(0)
+                                    ?.tabRenderer
+                                    ?.content
+                                    ?.sectionListRenderer
+                                    ?.contents
+                                    ?.get(0)
+                                    ?.musicResponsiveHeaderRenderer
+                                ?: result.contents
+                                    ?.twoColumnBrowseResultsRenderer
+                                    ?.tabs
+                                    ?.get(0)
+                                    ?.tabRenderer
+                                    ?.content
+                                    ?.sectionListRenderer
+                                    ?.contents
+                                    ?.get(0)
+                                    ?.musicEditablePlaylistDetailHeaderRenderer
+                                    ?.header
+                                    ?.musicResponsiveHeaderRenderer
+                        Log.d("getPlaylistData", "header: $header")
+                        val continueParam =
+                            result.getPlaylistContinuation()
+                        val radioEndpoint =
+                            result.getPlaylistRadioEndpoint()
+                        val shuffleEndpoint =
+                            result.getPlaylistShuffleEndpoint()
+                        Log.d("getPlaylistData", "Endpoint: $radioEndpoint $shuffleEndpoint")
+                        parsePlaylistData(header, data ?: emptyList(), playlistId, context)?.let { playlist ->
+                            emit(
+                                Resource.Success<Pair<PlaylistBrowse, String?>>(
+                                    Pair(
+                                        playlist.copy(
+                                            tracks =
+                                                playlist.tracks.toMutableList().apply {
+                                                    addAll(listContent)
+                                                },
+                                            trackCount = (playlist.trackCount + listContent.size),
+                                            shuffleEndpoint = shuffleEndpoint,
+                                            radioEndpoint = radioEndpoint,
+                                        ),
+                                        continueParam,
+                                    ),
+                                ),
+                            )
+                        } ?: emit(
+                            Resource.Error<
+                                Pair<PlaylistBrowse, String?>,
+                            >("Error"),
+                        )
                     }.onFailure { e ->
-                        Log.e("Playlist Data", e.message ?: "Error")
-                        emit(Resource.Error<PlaylistBrowse>(e.message.toString()))
+                        Log.e("getPlaylistData", e.message ?: "Error")
+                        emit(
+                            Resource.Error<
+                                Pair<PlaylistBrowse, String?>,
+                            >(e.message.toString()),
+                        )
                     }
             }
         }.flowOn(Dispatchers.IO)
 
-    suspend fun getAlbumData(browseId: String): Flow<Resource<AlbumBrowse>> =
+    fun getAlbumData(browseId: String): Flow<Resource<AlbumBrowse>> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .album(browseId, withSongs = true)
                     .onSuccess { result ->
                         emit(Resource.Success<AlbumBrowse>(parseAlbumData(result)))
@@ -1557,13 +1854,13 @@ class MainRepository(
             }
         }.flowOn(Dispatchers.IO)
 
-    suspend fun getAlbumMore(
+    fun getAlbumMore(
         browseId: String,
         params: String,
     ): Flow<BrowseResult?> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .browse(browseId = browseId, params = params)
                     .onSuccess { result ->
                         Log.w("Album More", "result: $result")
@@ -1575,13 +1872,13 @@ class MainRepository(
             }
         }.flowOn(Dispatchers.IO)
 
-    suspend fun getArtistData(channelId: String): Flow<Resource<ArtistBrowse>> =
+    fun getArtistData(channelId: String): Flow<Resource<ArtistBrowse>> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .artist(channelId)
                     .onSuccess { result ->
-                        emit(Resource.Success<ArtistBrowse>(parseArtistData(result, context)))
+                        emit(Resource.Success<ArtistBrowse>(parseArtistData(result)))
                     }.onFailure { e ->
                         Log.d("Artist", "Error: ${e.message}")
                         emit(Resource.Error<ArtistBrowse>(e.message.toString()))
@@ -1589,10 +1886,10 @@ class MainRepository(
             }
         }.flowOn(Dispatchers.IO)
 
-    suspend fun getSearchDataSong(query: String): Flow<Resource<ArrayList<SongsResult>>> =
+    fun getSearchDataSong(query: String): Flow<Resource<ArrayList<SongsResult>>> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .search(query, YouTube.SearchFilter.FILTER_SONG)
                     .onSuccess { result ->
                         val listSongs: ArrayList<SongsResult> = arrayListOf()
@@ -1602,7 +1899,7 @@ class MainRepository(
                         }
                         var count = 0
                         while (count < 2 && countinueParam != null) {
-                            YouTube
+                            youTube
                                 .searchContinuation(countinueParam)
                                 .onSuccess { values ->
                                     parseSearchSong(values).let { list ->
@@ -1628,7 +1925,7 @@ class MainRepository(
     suspend fun getSearchDataVideo(query: String): Flow<Resource<ArrayList<VideosResult>>> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .search(query, YouTube.SearchFilter.FILTER_VIDEO)
                     .onSuccess { result ->
                         val listSongs: ArrayList<VideosResult> = arrayListOf()
@@ -1638,7 +1935,7 @@ class MainRepository(
                         }
                         var count = 0
                         while (count < 2 && countinueParam != null) {
-                            YouTube
+                            youTube
                                 .searchContinuation(countinueParam)
                                 .onSuccess { values ->
                                     parseSearchVideo(values).let { list ->
@@ -1664,7 +1961,7 @@ class MainRepository(
     suspend fun getSearchDataPodcast(query: String): Flow<Resource<ArrayList<PlaylistsResult>>> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .search(query, YouTube.SearchFilter.FILTER_PODCAST)
                     .onSuccess { result ->
                         println(query)
@@ -1676,7 +1973,7 @@ class MainRepository(
                         }
                         var count = 0
                         while (count < 2 && countinueParam != null) {
-                            YouTube
+                            youTube
                                 .searchContinuation(countinueParam)
                                 .onSuccess { values ->
                                     parsePodcast(values.listPodcast).let { list ->
@@ -1701,7 +1998,7 @@ class MainRepository(
     suspend fun getSearchDataFeaturedPlaylist(query: String): Flow<Resource<ArrayList<PlaylistsResult>>> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .search(query, YouTube.SearchFilter.FILTER_FEATURED_PLAYLIST)
                     .onSuccess { result ->
                         val listPlaylist: ArrayList<PlaylistsResult> = arrayListOf()
@@ -1711,7 +2008,7 @@ class MainRepository(
                         }
                         var count = 0
                         while (count < 2 && countinueParam != null) {
-                            YouTube
+                            youTube
                                 .searchContinuation(countinueParam)
                                 .onSuccess { values ->
                                     parseSearchPlaylist(values).let { list ->
@@ -1736,7 +2033,7 @@ class MainRepository(
     suspend fun getSearchDataArtist(query: String): Flow<Resource<ArrayList<ArtistsResult>>> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .search(query, YouTube.SearchFilter.FILTER_ARTIST)
                     .onSuccess { result ->
                         val listArtist: ArrayList<ArtistsResult> = arrayListOf()
@@ -1746,7 +2043,7 @@ class MainRepository(
                         }
                         var count = 0
                         while (count < 2 && countinueParam != null) {
-                            YouTube
+                            youTube
                                 .searchContinuation(countinueParam)
                                 .onSuccess { values ->
                                     parseSearchArtist(values).let { list ->
@@ -1771,7 +2068,7 @@ class MainRepository(
     suspend fun getSearchDataAlbum(query: String): Flow<Resource<ArrayList<AlbumsResult>>> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .search(query, YouTube.SearchFilter.FILTER_ALBUM)
                     .onSuccess { result ->
                         val listAlbum: ArrayList<AlbumsResult> = arrayListOf()
@@ -1781,7 +2078,7 @@ class MainRepository(
                         }
                         var count = 0
                         while (count < 2 && countinueParam != null) {
-                            YouTube
+                            youTube
                                 .searchContinuation(countinueParam)
                                 .onSuccess { values ->
                                     parseSearchAlbum(values).let { list ->
@@ -1806,7 +2103,7 @@ class MainRepository(
     suspend fun getSearchDataPlaylist(query: String): Flow<Resource<ArrayList<PlaylistsResult>>> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .search(query, YouTube.SearchFilter.FILTER_COMMUNITY_PLAYLIST)
                     .onSuccess { result ->
                         val listPlaylist: ArrayList<PlaylistsResult> = arrayListOf()
@@ -1816,7 +2113,7 @@ class MainRepository(
                         }
                         var count = 0
                         while (count < 2 && countinueParam != null) {
-                            YouTube
+                            youTube
                                 .searchContinuation(countinueParam)
                                 .onSuccess { values ->
                                     parseSearchPlaylist(values).let { list ->
@@ -1841,13 +2138,13 @@ class MainRepository(
     suspend fun getSuggestQuery(query: String): Flow<Resource<SearchSuggestions>> =
         flow {
             runCatching {
-//            YouTube.getSuggestQuery(query).onSuccess {
+//            youTube.getSuggestQuery(query).onSuccess {
 //                emit(Resource.Success<ArrayList<String>>(it))
 //            }.onFailure { e ->
 //                Log.d("Suggest", "Error: ${e.message}")
 //                emit(Resource.Error<ArrayList<String>>(e.message.toString()))
 //            }
-                YouTube
+                youTube
                     .getYTMusicSearchSuggestions(query)
                     .onSuccess {
                         emit(Resource.Success(it))
@@ -1858,10 +2155,24 @@ class MainRepository(
             }
         }.flowOn(Dispatchers.IO)
 
+    suspend fun getRadioArtist(endpoint: WatchEndpoint): Flow<Resource<Pair<List<Track>, String?>>> =
+        flow {
+            runCatching {
+                youTube
+                    .next(endpoint)
+                    .onSuccess { next ->
+                        emit(Resource.Success(Pair(next.items.toListTrack(), next.continuation)))
+                    }.onFailure {
+                        it.printStackTrace()
+                        emit(Resource.Error(it.message ?: it.localizedMessage ?: "Error"))
+                    }
+            }
+        }
+
     suspend fun getRelatedData(videoId: String): Flow<Resource<Pair<ArrayList<Track>, String?>>> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .next(WatchEndpoint(videoId = videoId))
                     .onSuccess { next ->
                         val data: ArrayList<SongItem> = arrayListOf()
@@ -1885,7 +2196,7 @@ class MainRepository(
     suspend fun getYouTubeCaption(videoId: String): Flow<Resource<Lyrics>> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .getYouTubeCaption(videoId)
                     .onSuccess { lyrics ->
                         Log.w("Lyrics", "lyrics: ${lyrics.toLyrics()}")
@@ -1900,7 +2211,7 @@ class MainRepository(
     suspend fun getCanvas(
         videoId: String,
         duration: Int,
-    ): Flow<CanvasResponse?> =
+    ): Flow<com.maxrave.spotify.model.response.spotify.CanvasResponse?> =
         flow {
             runCatching {
                 getSongById(videoId).first().let { song ->
@@ -1917,17 +2228,36 @@ class MainRepository(
                             .replace(".", " ")
                             .replace("  ", " ")
                     var spotifyPersonalToken = ""
+                    var spotifyClientToken = ""
                     if (dataStoreManager.spotifyPersonalToken
                             .first()
                             .isNotEmpty() &&
+                        dataStoreManager.spotifyClientToken.first().isNotEmpty() &&
                         dataStoreManager.spotifyPersonalTokenExpires.first() > System.currentTimeMillis() &&
-                        dataStoreManager.spotifyPersonalTokenExpires.first() != 0L
+                        dataStoreManager.spotifyPersonalTokenExpires.first() != 0L &&
+                        dataStoreManager.spotifyClientTokenExpires.first() > System.currentTimeMillis() &&
+                        dataStoreManager.spotifyClientTokenExpires.first() != 0L
                     ) {
                         spotifyPersonalToken = dataStoreManager.spotifyPersonalToken.first()
+                        spotifyClientToken = dataStoreManager.spotifyClientToken.first()
                         Log.d("Canvas", "spotifyPersonalToken: $spotifyPersonalToken")
+                        Log.d("Canvas", "spotifyClientToken: $spotifyClientToken")
                     } else if (dataStoreManager.spdc.first().isNotEmpty()) {
-                        YouTube
-                            .getPersonalToken(dataStoreManager.spdc.first())
+                        spotify
+                            .getClientToken()
+                            .onSuccess {
+                                Log.d("Canvas", "clientToken: ${it.grantedToken.token}")
+                                dataStoreManager.setSpotifyClientTokenExpires(
+                                    (it.grantedToken.expiresAfterSeconds * 1000L),
+                                )
+                                dataStoreManager.setSpotifyClientToken(it.grantedToken.token)
+                                spotifyClientToken = it.grantedToken.token
+                            }.onFailure {
+                                it.printStackTrace()
+                                emit(null)
+                            }
+                        spotify
+                            .getPersonalTokenWithTotp(dataStoreManager.spdc.first())
                             .onSuccess {
                                 spotifyPersonalToken = it.accessToken
                                 dataStoreManager.setSpotifyPersonalToken(spotifyPersonalToken)
@@ -1940,28 +2270,47 @@ class MainRepository(
                                 emit(null)
                             }
                     }
-                    if (spotifyPersonalToken.isNotEmpty()) {
+                    if (spotifyPersonalToken.isNotEmpty() && spotifyClientToken.isNotEmpty()) {
                         val authToken = spotifyPersonalToken
-                        YouTube
-                            .searchSpotifyTrack(q, authToken)
+                        spotify
+                            .searchSpotifyTrack(q, authToken, spotifyClientToken)
                             .onSuccess { searchResponse ->
                                 Log.w("Canvas", "searchSpotifyResponse: $searchResponse")
                                 val track =
                                     if (duration != 0) {
                                         searchResponse.data?.searchV2?.tracksV2?.items?.find {
                                             abs(
-                                                (((it.item?.data?.duration?.totalMilliseconds ?: (0 / 1000)) - duration)),
+                                                (
+                                                    (
+                                                        (
+                                                            it.item
+                                                                ?.data
+                                                                ?.duration
+                                                                ?.totalMilliseconds ?: (0 / 1000)
+                                                        ) - duration
+                                                    )
+                                                ),
                                             ) < 1
                                         }
-                                            ?: searchResponse.data?.searchV2?.tracksV2?.items?.firstOrNull()
+                                            ?: searchResponse.data
+                                                ?.searchV2
+                                                ?.tracksV2
+                                                ?.items
+                                                ?.firstOrNull()
                                     } else {
-                                        searchResponse.data?.searchV2?.tracksV2?.items?.firstOrNull()
+                                        searchResponse.data
+                                            ?.searchV2
+                                            ?.tracksV2
+                                            ?.items
+                                            ?.firstOrNull()
                                     }
                                 if (track != null) {
-                                    YouTube
+                                    Log.w("Canvas", "track: $track")
+                                    spotify
                                         .getSpotifyCanvas(
                                             track.item?.data?.id ?: "",
                                             spotifyPersonalToken,
+                                            spotifyClientToken,
                                         ).onSuccess {
                                             Log.w("Canvas", "canvas: $it")
                                             emit(it)
@@ -2003,50 +2352,89 @@ class MainRepository(
                         .replace("  ", " ")
                 Log.d("Lyrics", "query: $q")
                 var spotifyPersonalToken = ""
+                var spotifyClientToken = ""
                 if (dataStoreManager.spotifyPersonalToken
                         .first()
                         .isNotEmpty() &&
                     dataStoreManager.spotifyPersonalTokenExpires.first() > System.currentTimeMillis() &&
-                    dataStoreManager.spotifyPersonalTokenExpires.first() != 0L
+                    dataStoreManager.spotifyPersonalTokenExpires.first() != 0L &&
+                    dataStoreManager.spotifyClientTokenExpires.first() > System.currentTimeMillis() &&
+                    dataStoreManager.spotifyClientTokenExpires.first() != 0L
                 ) {
                     spotifyPersonalToken = dataStoreManager.spotifyPersonalToken.first()
+                    spotifyClientToken = dataStoreManager.spotifyClientToken.first()
                     Log.d("Lyrics", "spotifyPersonalToken: $spotifyPersonalToken")
+                    Log.d("Lyrics", "spotifyClientToken: $spotifyClientToken")
                 } else if (dataStoreManager.spdc.first().isNotEmpty()) {
-                    YouTube
-                        .getPersonalToken(dataStoreManager.spdc.first())
-                        .onSuccess {
-                            spotifyPersonalToken = it.accessToken
-                            dataStoreManager.setSpotifyPersonalToken(spotifyPersonalToken)
-                            dataStoreManager.setSpotifyPersonalTokenExpires(
-                                it.accessTokenExpirationTimestampMs,
-                            )
-                            Log.d("Lyrics", "spotifyPersonalToken: $spotifyPersonalToken")
-                        }.onFailure {
-                            it.printStackTrace()
-                            emit(Resource.Error<Lyrics>("Not found"))
-                        }
+                    runBlocking {
+                        spotify
+                            .getClientToken()
+                            .onSuccess {
+                                Log.d("Canvas", "clientToken: ${it.grantedToken.token}")
+                                dataStoreManager.setSpotifyClientTokenExpires(
+                                    (it.grantedToken.expiresAfterSeconds * 1000L),
+                                )
+                                dataStoreManager.setSpotifyClientToken(it.grantedToken.token)
+                                spotifyClientToken = it.grantedToken.token
+                            }.onFailure {
+                                it.printStackTrace()
+                                emit(Resource.Error<Lyrics>("Not found"))
+                            }
+                    }
+                    runBlocking {
+                        spotify
+                            .getPersonalTokenWithTotp(dataStoreManager.spdc.first())
+                            .onSuccess {
+                                spotifyPersonalToken = it.accessToken
+                                dataStoreManager.setSpotifyPersonalToken(spotifyPersonalToken)
+                                dataStoreManager.setSpotifyPersonalTokenExpires(
+                                    it.accessTokenExpirationTimestampMs,
+                                )
+                                Log.d("Lyrics", "spotifyPersonalToken: $spotifyPersonalToken")
+                            }.onFailure {
+                                it.printStackTrace()
+                                emit(Resource.Error<Lyrics>("Not found"))
+                            }
+                    }
                 }
-                if (spotifyPersonalToken.isNotEmpty()) {
+                if (spotifyPersonalToken.isNotEmpty() && spotifyClientToken.isNotEmpty()) {
                     val authToken = spotifyPersonalToken
                     Log.d("Lyrics", "authToken: $authToken")
-                    YouTube
-                        .searchSpotifyTrack(q, authToken)
+                    spotify
+                        .searchSpotifyTrack(q, authToken, spotifyClientToken)
                         .onSuccess { searchResponse ->
                             val track =
                                 if (duration != 0 && duration != null) {
                                     searchResponse.data?.searchV2?.tracksV2?.items?.find {
                                         abs(
-                                            (((it.item?.data?.duration?.totalMilliseconds ?: (0 / 1000)) - duration)),
+                                            (
+                                                (
+                                                    (
+                                                        it.item
+                                                            ?.data
+                                                            ?.duration
+                                                            ?.totalMilliseconds ?: (0 / 1000)
+                                                    ) - duration
+                                                )
+                                            ),
                                         ) < 1
                                     }
-                                        ?: searchResponse.data?.searchV2?.tracksV2?.items?.firstOrNull()
+                                        ?: searchResponse.data
+                                            ?.searchV2
+                                            ?.tracksV2
+                                            ?.items
+                                            ?.firstOrNull()
                                 } else {
-                                    searchResponse.data?.searchV2?.tracksV2?.items?.firstOrNull()
+                                    searchResponse.data
+                                        ?.searchV2
+                                        ?.tracksV2
+                                        ?.items
+                                        ?.firstOrNull()
                                 }
                             Log.d("Lyrics", "track: $track")
                             if (track != null) {
-                                YouTube
-                                    .getSpotifyLyrics(track.item?.data?.id ?: "", spotifyPersonalToken)
+                                spotify
+                                    .getSpotifyLyrics(track.item?.data?.id ?: "", spotifyPersonalToken, spotifyClientToken)
                                     .onSuccess {
                                         emit(Resource.Success<Lyrics>(it.toLyrics()))
                                     }.onFailure {
@@ -2064,7 +2452,45 @@ class MainRepository(
             }
         }
 
-    suspend fun getLyricsData(
+    fun getLrclibLyricsData(
+        sartist: String,
+        strack: String,
+        duration: Int? = null,
+    ): Flow<Resource<Lyrics>> =
+        flow {
+            val qartist =
+                sartist
+                    .replace(
+                        Regex("\\((feat\\.|ft.|cùng với|con|mukana|com|avec|合作音乐人: ) "),
+                        " ",
+                    ).replace(
+                        Regex("( và | & | и | e | und |, |和| dan)"),
+                        " ",
+                    ).replace("  ", " ")
+                    .replace(Regex("([()])"), "")
+                    .replace(".", " ")
+            val qtrack =
+                strack
+                    .replace(
+                        Regex("\\((feat\\.|ft.|cùng với|con|mukana|com|avec|合作音乐人: ) "),
+                        " ",
+                    ).replace(
+                        Regex("( và | & | и | e | und |, |和| dan)"),
+                        " ",
+                    ).replace("  ", " ")
+                    .replace(Regex("([()])"), "")
+                    .replace(".", " ")
+            lyricsClient
+                .getLrclibLyrics(qtrack, qartist, duration)
+                .onSuccess {
+                    it?.let { emit(Resource.Success<Lyrics>(it.toLyrics())) }
+                }.onFailure {
+                    it.printStackTrace()
+                    emit(Resource.Error<Lyrics>("Not found"))
+                }
+        }.flowOn(Dispatchers.IO)
+
+    fun getLyricsData(
         sartist: String,
         strack: String,
         durationInt: Int? = null,
@@ -2098,12 +2524,12 @@ class MainRepository(
                         .replace(".", " ")
                 val q = "$qtrack $qartist"
                 Log.d(tag, "query: $q")
-                var musixMatchUserToken = YouTube.musixmatchUserToken
+                var musixMatchUserToken = lyricsClient.musixmatchUserToken
                 if (musixMatchUserToken == null) {
-                    YouTube
+                    lyricsClient
                         .getMusixmatchUserToken()
                         .onSuccess { usertoken ->
-                            YouTube.musixmatchUserToken = usertoken.message.body.user_token
+                            lyricsClient.musixmatchUserToken = usertoken.message.body.user_token
                             Log.d(tag, "musixMatchUserToken: ${usertoken.message.body.user_token}")
                             musixMatchUserToken = usertoken.message.body.user_token
                         }.onFailure { throwable ->
@@ -2111,7 +2537,7 @@ class MainRepository(
                             emit(Pair("", Resource.Error<Lyrics>("Not found")))
                         }
                 }
-                YouTube
+                lyricsClient
                     .searchMusixmatchTrackId(q, musixMatchUserToken!!)
                     .onSuccess { searchResult ->
                         Log.d(
@@ -2156,12 +2582,12 @@ class MainRepository(
                                     }
                                     val closestIndex =
                                         trackLengthList.minByOrNull {
-                                            kotlin.math.abs(
+                                            abs(
                                                 it - durationInt,
                                             )
                                         }
                                     if (closestIndex != null &&
-                                        kotlin.math.abs(
+                                        abs(
                                             closestIndex - durationInt,
                                         ) < 2
                                     ) {
@@ -2251,7 +2677,8 @@ class MainRepository(
                                 "item lyrics $track",
                             )
                             if (id != "" && track != null) {
-                                YouTube
+                                delay(1000)
+                                lyricsClient
                                     .getMusixmatchLyricsByQ(track, musixMatchUserToken!!)
                                     .onSuccess {
                                         if (it != null) {
@@ -2267,7 +2694,7 @@ class MainRepository(
                                         }
                                     }.onFailure { throwable ->
                                         throwable.printStackTrace()
-                                        YouTube
+                                        lyricsClient
                                             .getLrclibLyrics(qtrack, qartist, durationInt)
                                             .onSuccess {
                                                 it?.let { emit(Pair(id, Resource.Success<Lyrics>(it.toLyrics()))) }
@@ -2277,7 +2704,7 @@ class MainRepository(
                                             }
                                     }
                             } else {
-                                YouTube
+                                lyricsClient
                                     .fixSearchMusixmatch(
                                         q_artist = qartist,
                                         q_track = qtrack,
@@ -2287,7 +2714,8 @@ class MainRepository(
                                         val trackX = it.message.body.track
                                         Log.w(tag, "Fix Search Musixmatch: $trackX")
                                         if (trackX != null && (abs(trackX.track_length - (durationInt ?: 0)) <= 10)) {
-                                            YouTube
+                                            delay(1000)
+                                            lyricsClient
                                                 .getMusixmatchLyricsByQ(trackX, musixMatchUserToken!!)
                                                 .onSuccess {
                                                     Log.w(tag, "Item lyrics ${it?.lyrics?.syncType}")
@@ -2300,7 +2728,7 @@ class MainRepository(
                                                         )
                                                     } else {
                                                         Log.w("Lyrics", "Error: Lỗi getLyrics $it")
-                                                        YouTube.getLrclibLyrics(qtrack, qartist, durationInt)
+                                                        lyricsClient.getLrclibLyrics(qtrack, qartist, durationInt)
                                                         emit(Pair(id, Resource.Error<Lyrics>("Not found")))
                                                     }
                                                 }.onFailure {
@@ -2308,7 +2736,7 @@ class MainRepository(
                                                     emit(Pair(id, Resource.Error<Lyrics>("Not found")))
                                                 }
                                         } else {
-                                            YouTube
+                                            lyricsClient
                                                 .getLrclibLyrics(qtrack, qartist, durationInt)
                                                 .onSuccess {
                                                     it?.let { emit(Pair(trackX?.track_id.toString(), Resource.Success<Lyrics>(it.toLyrics()))) }
@@ -2319,7 +2747,7 @@ class MainRepository(
                                         }
                                     }.onFailure {
                                         Log.e(tag, "Fix musixmatch search" + it.message.toString())
-                                        YouTube
+                                        lyricsClient
                                             .getLrclibLyrics(qtrack, qartist, durationInt)
                                             .onSuccess {
                                                 Log.w(tag, "Liblrc Item lyrics ${it?.lyrics?.syncType}")
@@ -2337,231 +2765,14 @@ class MainRepository(
                         throwable.printStackTrace()
                         emit(Pair("", Resource.Error<Lyrics>("Not found")))
                     }
-
-//            YouTube.authentication().onSuccess { token ->
-//                if (token.accessToken != null) {
-//                    YouTube.getSongId(token.accessToken!!, q).onSuccess { spotifyResult ->
-//                        Log.d("SongId", "id: ${spotifyResult.tracks?.items?.get(0)?.id}")
-//                        if (!spotifyResult.tracks?.items.isNullOrEmpty()) {
-//                            val list = arrayListOf<String>()
-//                            for (index in spotifyResult.tracks?.items!!.indices) {
-//                                list.add(
-//                                    (spotifyResult.tracks?.items?.get(index)?.name ?: "") + " " + (spotifyResult.tracks?.items?.get(
-//                                        index
-//                                    )?.artists?.connectArtistsSpotify() ?: "")
-//                                )
-//                            }
-//                            Log.w("Lyrics", "list: $list")
-//                            var id = ""
-//                            val bestMatchingIndex = bestMatchingIndex(q, list)
-//                            if (q.contains(spotifyResult.tracks?.items?.get(bestMatchingIndex)?.name.toString()) && q.contains(spotifyResult.tracks?.items?.get(bestMatchingIndex)?.artists?.firstOrNull()?.name.toString())) {
-//                                id += spotifyResult.tracks?.items?.get(bestMatchingIndex)?.id
-//                                Log.w("Lyrics", "item: ${spotifyResult.tracks?.items?.get(bestMatchingIndex)?.name}")
-//                            }
-//                            else {
-//                                id += spotifyResult.tracks?.items?.get(0)?.id
-//                                Log.w("Lyrics", "item: ${spotifyResult.tracks?.items?.get(0)?.name}")
-//                            }
-//                            if (id != "") {
-//                                if (dataStoreManager.spotifyAccessTokenExpire.first() != 0L && dataStoreManager.spotifyAccessToken.first() != "" && (dataStoreManager.spotifyAccessTokenExpire.first()
-//                                        .toLong()) > Instant.now().toEpochMilli()) {
-//                                    Log.d(
-//                                        "Lyrics",
-//                                        "token: ${dataStoreManager.spotifyAccessToken.first()}"
-//                                    )
-//                                    YouTube.getLyrics(
-//                                        id,
-//                                        dataStoreManager.spotifyAccessToken.first()
-//                                    ).onSuccess { lyrics ->
-//                                        emit(Resource.Success<Lyrics>(lyrics.toLyrics()))
-//                                    }.onFailure { throwable ->
-//                                        Log.d(
-//                                            "Lyrics",
-//                                            "Error: Lỗi getLyrics ${throwable.message}"
-//                                        )
-//                                        spotifyResult.tracks?.items?.firstOrNull()?.id?.let { it2 ->
-//                                            YouTube.getLyrics(
-//                                                it2,
-//                                                dataStoreManager.spotifyAccessToken.first()
-//                                            ).onSuccess {
-//                                                emit(Resource.Success<Lyrics>(it.toLyrics()))
-//                                            }
-//                                                .onFailure {
-//                                                    Log.d(
-//                                                        "Lyrics",
-//                                                        "Error: Lỗi getLyrics lần 2 ${it.message}"
-//                                                    )
-//                                                    emit(Resource.Error<Lyrics>("Not found"))
-//                                                }
-//                                        }
-//                                        emit(Resource.Error<Lyrics>("Not found"))
-//                                    }
-//                                }
-//                                else {
-//                                    YouTube.getAccessToken()
-//                                        .onSuccess { value: AccessToken ->
-//                                            dataStoreManager.setSpotifyAccessToken(value.accessToken!!)
-//                                            dataStoreManager.setSpotifyAccessTokenExpire(
-//                                                value.accessTokenExpirationTimestampMs!!
-//                                            )
-//                                            Log.d(
-//                                                "Lyrics",
-//                                                "token: ${value.accessToken}"
-//                                            )
-//                                            YouTube.getLyrics(id, value.accessToken)
-//                                                .onSuccess { lyrics ->
-//                                                    emit(Resource.Success<Lyrics>(lyrics.toLyrics()))
-//                                                }.onFailure { throwable ->
-//                                                    throwable.printStackTrace()
-//                                                    spotifyResult.tracks?.items?.firstOrNull()?.id?.let { it2 ->
-//                                                        YouTube.getLyrics(
-//                                                            it2,
-//                                                            value.accessToken
-//                                                        ).onSuccess {
-//                                                            emit(
-//                                                                Resource.Success<Lyrics>(
-//                                                                    it.toLyrics()
-//                                                                )
-//                                                            )
-//                                                        }
-//                                                            .onFailure {
-//                                                                Log.d(
-//                                                                    "Lyrics",
-//                                                                    "Error: Lỗi getLyrics lần 2 ${it.message}"
-//                                                                )
-//                                                                emit(
-//                                                                    Resource.Error<Lyrics>(
-//                                                                        "Not found"
-//                                                                    )
-//                                                                )
-//                                                            }
-//                                                    }
-//                                                    emit(Resource.Error<Lyrics>("Not found"))
-//                                                }
-//                                        }
-//                                        .onFailure { e ->
-//                                            e.printStackTrace()
-//                                            emit(Resource.Error<Lyrics>("Not found"))
-//                                        }
-//                                }
-//                            }
-//                            else {
-//                                Log.w("Lyrics", "Can't find song id")
-//                                emit(Resource.Error<Lyrics>("Not found"))
-//                            }
-//                            //                            bestMatchingIndex(q, list).let {
-// //                            bestMatchingIndex(q, list).let { index ->
-// //                                spotifyResult.tracks?.items?.get(index)?.let { item ->
-// //                                    if (list[index].contains(item.name.toString())) {
-// //                                        Log.w("Lyrics", "item: ${item.name}")
-// //                                        item.id?.let { it1 ->
-// //                                            Log.d("Lyrics", "id: $it1")
-// //                                            if (dataStoreManager.spotifyAccessTokenExpire.first() != 0L && dataStoreManager.spotifyAccessToken.first() != "" && (dataStoreManager.spotifyAccessTokenExpire.first()
-// //                                                    .toLong()) > Instant.now().toEpochMilli()
-// //                                            ) {
-// //                                                Log.d(
-// //                                                    "Lyrics",
-// //                                                    "token: ${dataStoreManager.spotifyAccessToken.first()}"
-// //                                                )
-// //                                                YouTube.getLyrics(
-// //                                                    it1,
-// //                                                    dataStoreManager.spotifyAccessToken.first()
-// //                                                ).onSuccess { lyrics ->
-// //                                                    emit(Resource.Success<Lyrics>(lyrics.toLyrics()))
-// //                                                }.onFailure {
-// //                                                    Log.d(
-// //                                                        "Lyrics",
-// //                                                        "Error: Lỗi getLyrics ${it.message}"
-// //                                                    )
-// //                                                    spotifyResult.tracks?.items?.firstOrNull()?.id?.let { it2 ->
-// //                                                        YouTube.getLyrics(
-// //                                                            it2,
-// //                                                            dataStoreManager.spotifyAccessToken.first()
-// //                                                        ).onSuccess {
-// //                                                            emit(Resource.Success<Lyrics>(it.toLyrics()))
-// //                                                        }
-// //                                                            .onFailure {
-// //                                                                Log.d(
-// //                                                                    "Lyrics",
-// //                                                                    "Error: Lỗi getLyrics lần 2 ${it.message}"
-// //                                                                )
-// //                                                                emit(Resource.Error<Lyrics>("Not found"))
-// //                                                            }
-// //                                                    }
-// //                                                    emit(Resource.Error<Lyrics>("Not found"))
-// //                                                }
-// //                                            } else {
-// //                                                YouTube.getAccessToken()
-// //                                                    .onSuccess { value: AccessToken ->
-// //                                                        dataStoreManager.setSpotifyAccessToken(value.accessToken!!)
-// //                                                        dataStoreManager.setSpotifyAccessTokenExpire(
-// //                                                            value.accessTokenExpirationTimestampMs!!
-// //                                                        )
-// //                                                        Log.d(
-// //                                                            "Lyrics",
-// //                                                            "token: ${value.accessToken}"
-// //                                                        )
-// //                                                        YouTube.getLyrics(it1, value.accessToken)
-// //                                                            .onSuccess { lyrics ->
-// //                                                                emit(Resource.Success<Lyrics>(lyrics.toLyrics()))
-// //                                                            }.onFailure {
-// //                                                                it.printStackTrace()
-// //                                                                spotifyResult.tracks?.items?.firstOrNull()?.id?.let { it2 ->
-// //                                                                    YouTube.getLyrics(
-// //                                                                        it2,
-// //                                                                        value.accessToken
-// //                                                                    ).onSuccess {
-// //                                                                        emit(
-// //                                                                            Resource.Success<Lyrics>(
-// //                                                                                it.toLyrics()
-// //                                                                            )
-// //                                                                        )
-// //                                                                    }
-// //                                                                        .onFailure {
-// //                                                                            Log.d(
-// //                                                                                "Lyrics",
-// //                                                                                "Error: Lỗi getLyrics lần 2 ${it.message}"
-// //                                                                            )
-// //                                                                            emit(
-// //                                                                                Resource.Error<Lyrics>(
-// //                                                                                    "Not found"
-// //                                                                                )
-// //                                                                            )
-// //                                                                        }
-// //                                                                }
-// //                                                                emit(Resource.Error<Lyrics>("Not found"))
-// //                                                            }
-// //                                                    }
-// //                                                    .onFailure { e ->
-// //                                                        e.printStackTrace()
-// //                                                        emit(Resource.Error<Lyrics>("Not found"))
-// //                                                    }
-// //                                            }
-// //                                        }
-// //                                    }
-// //                                    else {
-// //
-// //                                    }
-// //                                }
-// //                            }
-//
-//                        }
-//                    }
-//                } else {
-//                    emit(Resource.Error<Lyrics>("Not found"))
-//                }
-//            }.onFailure {
-//                Log.d("SongId", "Error: ${it.message}")
-//                emit(Resource.Error<Lyrics>("Not found"))
-//            }
             }
         }.flowOn(Dispatchers.IO)
 
     suspend fun getTranslateLyrics(id: String): Flow<MusixmatchTranslationLyricsResponse?> =
         flow {
             runCatching {
-                YouTube.musixmatchUserToken?.let {
-                    YouTube
+                lyricsClient.musixmatchUserToken?.let {
+                    lyricsClient
                         .getMusixmatchTranslateLyrics(
                             id,
                             it,
@@ -2587,7 +2798,7 @@ class MainRepository(
                     } else {
                         videoId
                     }
-                YouTube
+                youTube
                     .getSongInfo(id)
                     .onSuccess { songInfo ->
                         val song =
@@ -2617,7 +2828,7 @@ class MainRepository(
     suspend fun getLikeStatus(videoId: String): Flow<Boolean> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .getLikedInfo(videoId)
                     .onSuccess {
                         if (it == LikeStatus.LIKE) emit(true) else emit(false)
@@ -2635,7 +2846,7 @@ class MainRepository(
             Log.w("Stream", "now: ${LocalDateTime.now()}")
             Log.w("Stream", "isExpired: ${oldFormat.expiredTime.isBefore(LocalDateTime.now())}")
             if (oldFormat.expiredTime.isBefore(LocalDateTime.now())) {
-                YouTube
+                youTube
                     .player(videoId)
                     .onSuccess { triple ->
                         val response = triple.second
@@ -2675,7 +2886,7 @@ class MainRepository(
     ): Flow<String?> =
         flow {
             // 134, 136, 137
-            YouTube
+            youTube
                 .player(videoId)
                 .onSuccess { data ->
                     val itag = QUALITY.itags.getOrNull(QUALITY.items.indexOf(dataStoreManager.quality.first()))
@@ -2722,8 +2933,13 @@ class MainRepository(
                             }
                         }
                     if (format == null) {
-                        format = response.streamingData?.adaptiveFormats?.lastOrNull()
+                        format = response.streamingData?.adaptiveFormats?.lastOrNull() ?: response.streamingData?.formats?.lastOrNull()
                     }
+                    val superFormat =
+                        response.streamingData?.adaptiveFormats?.find {
+                            it.quality == "AUDIO_QUALITY_HIGH"
+                        }
+                    Log.w("Stream", "Super format: $superFormat")
                     Log.w("Stream", "format: $format")
                     Log.d("Stream", "expireInSeconds ${response.streamingData?.expiresInSeconds}")
                     Log.w("Stream", "expired at ${LocalDateTime.now().plusSeconds(response.streamingData?.expiresInSeconds?.toLong() ?: 0L)}")
@@ -2807,7 +3023,7 @@ class MainRepository(
 
     suspend fun getLibraryPlaylist(): Flow<ArrayList<PlaylistsResult>?> =
         flow {
-            YouTube
+            youTube
                 .getLibraryPlaylists()
                 .onSuccess { data ->
                     val input =
@@ -2847,7 +3063,7 @@ class MainRepository(
         playlistId: String?,
     ): Flow<Pair<Int, Float>> =
         flow {
-            YouTube
+            youTube
                 .initPlayback(playback, atr, watchTime, cpn, playlistId)
                 .onSuccess { response ->
                     emit(response)
@@ -2859,7 +3075,7 @@ class MainRepository(
 
     suspend fun getSkipSegments(videoId: String): Flow<List<SkipSegments>?> =
         flow {
-            YouTube
+            youTube
                 .getSkipSegments(videoId)
                 .onSuccess {
                     emit(it)
@@ -2871,7 +3087,7 @@ class MainRepository(
     fun getFullMetadata(videoId: String): Flow<YouTubeInitialPage?> =
         flow {
             Log.w("getFullMetadata", "videoId: $videoId")
-            YouTube
+            youTube
                 .getFullMetadata(videoId)
                 .onSuccess {
                     emit(it)
@@ -2883,7 +3099,7 @@ class MainRepository(
 
     fun checkForUpdate(): Flow<GithubResponse?> =
         flow {
-            YouTube
+            youTube
                 .checkForUpdate()
                 .onSuccess {
                     emit(it)
@@ -2902,10 +3118,10 @@ class MainRepository(
                     id += youtubePlaylistId
                 }
                 Log.d("Repository", "playlist id: $id")
-                YouTube
+                youTube
                     .customQuery(browseId = id, setLogin = true)
                     .onSuccess { result ->
-                        val listContent: ArrayList<MusicShelfRenderer.Content> = arrayListOf()
+                        val listContent: ArrayList<SongItem> = arrayListOf()
                         val data: List<MusicShelfRenderer.Content>? =
                             result.contents
                                 ?.singleColumnBrowseResultsRenderer
@@ -2920,53 +3136,38 @@ class MainRepository(
                                     0,
                                 )?.musicPlaylistShelfRenderer
                                 ?.contents
-                        if (data != null) {
-                            Log.d("Data", "data: $data")
-                            Log.d("Data", "data size: ${data.size}")
-                            listContent.addAll(data)
-                        }
                         var continueParam =
-                            result.contents
-                                ?.singleColumnBrowseResultsRenderer
-                                ?.tabs
-                                ?.get(
-                                    0,
-                                )?.tabRenderer
-                                ?.content
-                                ?.sectionListRenderer
-                                ?.contents
-                                ?.get(
-                                    0,
-                                )?.musicPlaylistShelfRenderer
-                                ?.continuations
-                                ?.get(
-                                    0,
-                                )?.nextContinuationData
-                                ?.continuation
+                            result.getPlaylistContinuation()
                         var count = 0
                         Log.d("Repository", "playlist data: ${listContent.size}")
                         Log.d("Repository", "continueParam: $continueParam")
                         while (continueParam != null) {
-                            YouTube
+                            youTube
                                 .customQuery(
                                     browseId = "",
                                     continuation = continueParam,
                                     setLogin = true,
                                 ).onSuccess { values ->
-                                    Log.d("Continue", "continue: $continueParam")
-                                    val dataMore: List<MusicShelfRenderer.Content>? =
-                                        values.continuationContents?.musicPlaylistShelfContinuation?.contents
-                                    if (dataMore != null) {
-                                        listContent.addAll(dataMore)
-                                    }
+                                    Log.d("getPlaylistData", "continue: $continueParam")
+                                    Log.d(
+                                        "getPlaylistData",
+                                        "values: ${values.onResponseReceivedActions}",
+                                    )
+                                    val dataMore: List<SongItem> =
+                                        values.onResponseReceivedActions
+                                            ?.firstOrNull()
+                                            ?.appendContinuationItemsAction
+                                            ?.continuationItems
+                                            ?.apply {
+                                                Log.w("getPlaylistData", "dataMore: ${this.size}")
+                                            }?.mapNotNull {
+                                                NextPage.fromMusicResponsiveListItemRenderer(
+                                                    it.musicResponsiveListItemRenderer ?: return@mapNotNull null,
+                                                )
+                                            } ?: emptyList()
+                                    listContent.addAll(dataMore)
                                     continueParam =
-                                        values.continuationContents
-                                            ?.musicPlaylistShelfContinuation
-                                            ?.continuations
-                                            ?.get(
-                                                0,
-                                            )?.nextContinuationData
-                                            ?.continuation
+                                        values.getPlaylistContinuation()
                                     count++
                                 }.onFailure {
                                     Log.e("Continue", "Error: ${it.message}")
@@ -2975,10 +3176,18 @@ class MainRepository(
                                 }
                         }
                         Log.d("Repository", "playlist final data: ${listContent.size}")
-                        parseSetVideoId(youtubePlaylistId, listContent).let { playlist ->
-                            Log.d("Repository", "playlist final data setVideoId: $playlist")
+                        parseSetVideoId(youtubePlaylistId, data ?: emptyList()).let { playlist ->
                             playlist.forEach { item ->
                                 insertSetVideoId(item)
+                            }
+                            listContent.forEach { item ->
+                                insertSetVideoId(
+                                    SetVideoIdEntity(
+                                        videoId = item.id,
+                                        setVideoId = item.setVideoId,
+                                        youtubePlaylistId = youtubePlaylistId,
+                                    ),
+                                )
                             }
                             emit(playlist)
                         }
@@ -2989,67 +3198,12 @@ class MainRepository(
             }
         }.flowOn(Dispatchers.IO)
 
-    suspend fun createYouTubePlaylist(playlist: LocalPlaylistEntity): Flow<String?> =
-        flow {
-            runCatching {
-                YouTube
-                    .createPlaylist(playlist.title, playlist.tracks)
-                    .onSuccess {
-                        emit(it.playlistId)
-                    }.onFailure {
-                        it.printStackTrace()
-                        emit(null)
-                    }
-            }
-        }
-
-    suspend fun editYouTubePlaylist(
-        title: String,
-        youtubePlaylistId: String,
-    ): Flow<Int> =
-        flow {
-            runCatching {
-                YouTube
-                    .editPlaylist(youtubePlaylistId, title)
-                    .onSuccess { response ->
-                        emit(response)
-                    }.onFailure {
-                        it.printStackTrace()
-                        emit(0)
-                    }
-            }
-        }
-
-    suspend fun removeYouTubePlaylistItem(
-        youtubePlaylistId: String,
-        videoId: String,
-    ) = flow {
-        runCatching {
-            getSetVideoId(videoId).collect { setVideoId ->
-                if (setVideoId?.setVideoId != null) {
-                    YouTube
-                        .removeItemYouTubePlaylist(
-                            youtubePlaylistId,
-                            videoId,
-                            setVideoId.setVideoId,
-                        ).onSuccess {
-                            emit(it)
-                        }.onFailure {
-                            emit(0)
-                        }
-                } else {
-                    emit(0)
-                }
-            }
-        }
-    }
-
     suspend fun addYouTubePlaylistItem(
         youtubePlaylistId: String,
         videoId: String,
     ) = flow {
         runCatching {
-            YouTube
+            youTube
                 .addPlaylistItem(youtubePlaylistId.verifyYouTubePlaylistId(), videoId)
                 .onSuccess {
                     if (it.playlistEditResults.isNotEmpty()) {
@@ -3077,12 +3231,13 @@ class MainRepository(
     ): Flow<MusixmatchCredential?> =
         flow {
             runCatching {
-                if (YouTube.musixmatchUserToken != null && YouTube.musixmatchUserToken != "") {
-                    YouTube
+                val userToken = lyricsClient.musixmatchUserToken
+                if (!userToken.isNullOrEmpty()) {
+                    lyricsClient
                         .postMusixmatchCredentials(
                             email,
                             password,
-                            YouTube.musixmatchUserToken!!,
+                            userToken,
                         ).onSuccess { response ->
                             emit(response)
                         }.onFailure {
@@ -3090,16 +3245,17 @@ class MainRepository(
                             emit(null)
                         }
                 } else {
-                    YouTube
+                    lyricsClient
                         .getMusixmatchUserToken()
                         .onSuccess { usertoken ->
-                            YouTube.musixmatchUserToken = usertoken.message.body.user_token
+                            lyricsClient.musixmatchUserToken = usertoken.message.body.user_token
+                            val newUserToken = usertoken.message.body.user_token
                             delay(2000)
-                            YouTube
+                            lyricsClient
                                 .postMusixmatchCredentials(
                                     email,
                                     password,
-                                    YouTube.musixmatchUserToken!!,
+                                    newUserToken,
                                 ).onSuccess { response ->
                                     emit(response)
                                 }.onFailure {
@@ -3122,7 +3278,7 @@ class MainRepository(
     ): Flow<Int> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .updateWatchTime(
                         playbackTrackingVideostatsWatchtimeUrl,
                         watchTimeList,
@@ -3144,7 +3300,7 @@ class MainRepository(
     ): Flow<Int> =
         flow {
             runCatching {
-                YouTube
+                youTube
                     .updateWatchTimeFull(watchTime, cpn, playlistId)
                     .onSuccess { response ->
                         emit(response)
@@ -3159,7 +3315,7 @@ class MainRepository(
         flow {
             if (mediaId != null) {
                 runCatching {
-                    YouTube
+                    youTube
                         .addToLiked(mediaId)
                         .onSuccess {
                             Log.d("Liked", "Success: $it")
@@ -3176,7 +3332,7 @@ class MainRepository(
         flow {
             if (mediaId != null) {
                 runCatching {
-                    YouTube
+                    youTube
                         .removeFromLiked(mediaId)
                         .onSuccess {
                             Log.d("Liked", "Success: $it")
@@ -3188,4 +3344,10 @@ class MainRepository(
                 }
             }
         }.flowOn(Dispatchers.IO)
+
+    fun downloadToFile(
+        path: String,
+        videoId: String,
+        isVideo: Boolean,
+    ): Flow<DownloadProgress> = youTube.download(path, videoId, isVideo)
 }
